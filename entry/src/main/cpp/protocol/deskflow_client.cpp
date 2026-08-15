@@ -50,73 +50,152 @@ void OnInjectAuthCallback(Input_InjectionStatus status)
     DF_LOGI("injection auth callback: %{public}s", text);
 }
 
-// Map X11 keysym (deskflow KeyID) to HarmonyOS KeyCode. Returns -1 if unmapped.
+// Map X11 keysym (deskflow KeyID) to HarmonyOS KeyCode.
+// deskflow KeyID: U+E000..U+EFFF for control keys (= X11 keysym - 0x1000),
+// printable ASCII are their Unicode codepoints. Values from deskflow KeyTypes.h.
+// HarmonyOS KeyCode values from oh_key_code.h. Returns -1 if no equivalent.
 int32_t keysymToKeycode(uint32_t keysym)
 {
-    if (keysym >= 0x61 && keysym <= 0x7A) {
-        return 2017 + static_cast<int32_t>(keysym - 0x61); // KEYCODE_A .. KEYCODE_Z
+    // deskflow 对 0xEF00~0xEFFF 区间的键以 16 位有符号值传输，到达时可能被符号扩展
+    // 成 0xFFFFEFxx。必须掩码回 16 位才能命中下面的常量（例：Tab 0xEF09->0xFFFFEF09）。
+    keysym &= 0xFFFF;
+
+    // 可打印 ASCII：字母（大小写）/ 数字 / 空格与符号 -> 对应物理键
+    // （Shift 等作为独立修饰键注入，字母可能带大写 keysym，统一映射到同一物理键）
+    if ((keysym >= 'a' && keysym <= 'z') || (keysym >= 'A' && keysym <= 'Z')) {
+        return KEYCODE_A + static_cast<int32_t>((keysym & 0x1F) - 1); // KEYCODE_A=2017
     }
-    if (keysym >= 0x30 && keysym <= 0x39) {
-        return 2000 + static_cast<int32_t>(keysym - 0x30); // KEYCODE_0 .. KEYCODE_9
-    }
-    if (keysym >= kKeyF1 && keysym <= kKeyF12) {
-        return 2090 + static_cast<int32_t>(keysym - kKeyF1);
-    }
-    // 小键盘数字 0-9（KEYCODE_NUMPAD_0=2103 .. KEYCODE_NUMPAD_9=2112）
-    if (keysym >= kKeyKp0 && keysym <= kKeyKp9) {
-        return 2103 + static_cast<int32_t>(keysym - kKeyKp0);
+    if (keysym >= '0' && keysym <= '9') {
+        return KEYCODE_0 + static_cast<int32_t>(keysym - '0'); // KEYCODE_0=2000
     }
     switch (keysym) {
-        case kKeyReturn:    return 2054; // KEYCODE_ENTER
-        case kKeyBackSpace: return 2055; // KEYCODE_DEL (backspace)
-        case kKeyTab:       return 2049;
-        case kKeySpace:     return 2050;
-        case kKeyEscape:    return 2070;
-        case kKeyLeft:      return 2014; // KEYCODE_DPAD_LEFT
-        case kKeyUp:        return 2012; // KEYCODE_DPAD_UP
-        case kKeyRight:     return 2015; // KEYCODE_DPAD_RIGHT
-        case kKeyDown:      return 2013; // KEYCODE_DPAD_DOWN
-        case kKeyHome:      return 2081; // KEYCODE_MOVE_HOME
-        case kKeyEnd:       return 2082; // KEYCODE_MOVE_END
-        case kKeyPageUp:    return 2068;
-        case kKeyPageDown:  return 2069;
-        case kKeyInsert:    return 2083;
-        case kKeyDelete:    return 2071; // KEYCODE_FORWARD_DEL
-        case kKeyCapsLock:  return 2074;
-        case kKeyShiftL:    return 2047;
-        case kKeyShiftR:    return 2048;
-        case kKeyControlL:  return 2072;
-        case kKeyControlR:  return 2073;
-        case kKeyAltL:      return 2045;
-        case kKeyAltR:      return 2046;
-        case kKeyMetaL:     return 2076; // KEYCODE_META_LEFT
-        case kKeySuperL:    return 2076;
-        case kKeySuperR:    return 2077;
-        case kKeyNumLock:   return 2102;
-        case kKeyScrollLock: return 2075;
-        case kKeyPrintScreen: return 2079; // KEYCODE_SYSRQ
-        // 小键盘符号键
-        case kKeyKpEnter:    return 2119; // KEYCODE_NUMPAD_ENTER
-        case kKeyKpMultiply: return 2114; // KEYCODE_NUMPAD_MULTIPLY
-        case kKeyKpAdd:      return 2116; // KEYCODE_NUMPAD_ADD
-        case kKeyKpSeparator: return 2118; // KEYCODE_NUMPAD_COMMA
-        case kKeyKpSubtract: return 2115; // KEYCODE_NUMPAD_SUBTRACT
-        case kKeyKpDecimal:  return 2117; // KEYCODE_NUMPAD_DOT
-        case kKeyKpDivide:   return 2113; // KEYCODE_NUMPAD_DIVIDE
-        case kKeyKpEqual:    return 2120; // KEYCODE_NUMPAD_EQUALS
-        case 0x2C: return 2043; // comma
-        case 0x2E: return 2044; // period
-        case 0x2D: return 2057; // minus
-        case 0x3D: return 2058; // equals
-        case 0x5B: return 2059; // left bracket
-        case 0x5D: return 2060; // right bracket
-        case 0x5C: return 2061; // backslash
-        case 0x3B: return 2062; // semicolon
-        case 0x27: return 2063; // apostrophe
-        case 0x2F: return 2064; // slash
-        case 0x60: return 2056; // grave
-        default: return -1;
+        case ' ':       return KEYCODE_SPACE;            // 2050
+        case ',':       return KEYCODE_COMMA;            // 2043
+        case '.':       return KEYCODE_PERIOD;           // 2044
+        case '-':       return KEYCODE_MINUS;            // 2057
+        case '=':       return KEYCODE_EQUALS;           // 2058
+        case '[':       return KEYCODE_LEFT_BRACKET;     // 2059
+        case ']':       return KEYCODE_RIGHT_BRACKET;    // 2060
+        case '\\':      return KEYCODE_BACKSLASH;        // 2061
+        case ';':       return KEYCODE_SEMICOLON;        // 2062
+        case '\'':      return KEYCODE_APOSTROPHE;       // 2063
+        case '/':       return KEYCODE_SLASH;            // 2064
+        case '`':       return KEYCODE_GRAVE;            // 2056
+        case '@':       return KEYCODE_AT;               // 2065
+        case '+':       return KEYCODE_PLUS;             // 2066
+        case 0x002a:    return KEYCODE_STAR;             // '*' (=2010)
+        case 0x0023:    return KEYCODE_POUND;            // '#' (=2011)
     }
+
+    // 光标/编辑键
+    switch (keysym) {
+        case kKeyBackSpace: return KEYCODE_DEL;          // 2055
+        case kKeyTab:       return KEYCODE_TAB;          // 2049
+        case kKeyReturn:    return KEYCODE_ENTER;        // 2054
+        case kKeyEscape:    return KEYCODE_ESCAPE;       // 2070
+        case kKeyHome:      return KEYCODE_MOVE_HOME;    // 2081
+        case kKeyEnd:       return KEYCODE_MOVE_END;     // 2082
+        case kKeyLeft:      return KEYCODE_DPAD_LEFT;    // 2014
+        case kKeyUp:        return KEYCODE_DPAD_UP;      // 2012
+        case kKeyRight:     return KEYCODE_DPAD_RIGHT;   // 2015
+        case kKeyDown:      return KEYCODE_DPAD_DOWN;    // 2013
+        case kKeyPageUp:    return KEYCODE_PAGE_UP;      // 2068
+        case kKeyPageDown:  return KEYCODE_PAGE_DOWN;    // 2069
+        case kKeyInsert:    return KEYCODE_INSERT;       // 2083
+        case kKeyDelete:    return KEYCODE_FORWARD_DEL;  // 2071
+        case kKeyClear:     return KEYCODE_MOVE_HOME;    // 用 HOME 近似清屏
+        case kKeyLinefeed:  return KEYCODE_LINEFEED;     // 2609
+        case kKeyLeftTab:   return KEYCODE_TAB;          // 反向 Tab
+        case kKeySelect:    return KEYCODE_FORWARD;      // 2084
+        case kKeyExecute:   return KEYCODE_MENU;         // 2067 近似
+        case kKeyMenu:      return KEYCODE_MENU;         // 2067
+        case kKeyFind:      return KEYCODE_FIND;         // 2623
+        case kKeyCancel:    return KEYCODE_CANCEL;       // 2648
+        case kKeyHelp:      return KEYCODE_HELP;         // 2625
+        case kKeyUndo:      return KEYCODE_UNDO;         // 2619
+        case kKeyRedo:      return KEYCODE_REDO;         // 2641
+    }
+
+    // 锁定/修饰键
+    switch (keysym) {
+        case kKeyCapsLock:    return KEYCODE_CAPS_LOCK;      // 2074
+        case kKeyNumLock:     return KEYCODE_NUM_LOCK;       // 2102
+        case kKeyScrollLock:  return KEYCODE_SCROLL_LOCK;    // 2075
+        case kKeyShiftL:      return KEYCODE_SHIFT_LEFT;     // 2047
+        case kKeyShiftR:      return KEYCODE_SHIFT_RIGHT;    // 2048
+        case kKeyControlL:    return KEYCODE_CTRL_LEFT;      // 2072
+        case kKeyControlR:    return KEYCODE_CTRL_RIGHT;     // 2073
+        case kKeyAltL:        return KEYCODE_ALT_LEFT;       // 2045
+        case kKeyAltR:        return KEYCODE_ALT_RIGHT;      // 2046
+        case kKeyAltGr:       return KEYCODE_ALT_RIGHT;      // 用右 Alt 近似
+        case kKeyMetaL:       return KEYCODE_META_LEFT;      // 2076
+        case kKeyMetaR:       return KEYCODE_META_RIGHT;     // 2077
+        case kKeySuperL:      return KEYCODE_META_LEFT;      // Super=Meta
+        case kKeySuperR:      return KEYCODE_META_RIGHT;
+    }
+
+    // 系统键
+    switch (keysym) {
+        case kKeyPause:        return KEYCODE_BREAK;         // 2080
+        case kKeySysReq:       return KEYCODE_SYSRQ;         // 2079
+        case kKeyPrint:        return KEYCODE_PRINT;         // 2645
+        case kKeyBreak:        return KEYCODE_BREAK;         // 2080
+        case kKeySleep:        return KEYCODE_SLEEP;         // 2600
+        case kKeyEject:        return KEYCODE_MEDIA_EJECT;   // 2088
+        case kKeyZenkaku:      return KEYCODE_ZENKAKU_HANKAKU; // 2601
+        case kKeyKana:         return KEYCODE_KATAKANA;      // 2604
+        case kKeyHiraganaKatakana: return KEYCODE_KATAKANA_HIRAGANA; // 2607
+        case kKeyHenkan:       return KEYCODE_HENKAN;        // 2606
+        case kKeyHangul:       return KEYCODE_HANGUEL;       // 2613
+        case kKeyHanja:        return KEYCODE_HANJA;         // 2614
+    }
+
+    // 功能键 F1..F35（HarmonyOS 只到 F24=2827）
+    if (keysym >= kKeyF1 && keysym <= kKeyF24) {
+        return KEYCODE_F1 + static_cast<int32_t>(keysym - kKeyF1); // 2090+
+    }
+
+    // 媒体/亮度/应用键（extended 0xE0xx，从 KeyTypes.h）
+    switch (keysym) {
+        case kKeyAudioMute:     return KEYCODE_VOLUME_MUTE;     // 22
+        case kKeyAudioDown:     return KEYCODE_VOLUME_DOWN;       // 17
+        case kKeyAudioUp:       return KEYCODE_VOLUME_UP;         // 16
+        case kKeyAudioNext:     return KEYCODE_MEDIA_NEXT;        // 12
+        case kKeyAudioPrev:     return KEYCODE_MEDIA_PREVIOUS;    // 13
+        case kKeyAudioStop:     return KEYCODE_MEDIA_STOP;        // 11
+        case kKeyAudioPlay:     return KEYCODE_MEDIA_PLAY_PAUSE;  // 10
+        case kKeyAppMail:       return KEYCODE_ENVELOPE;          // 2053
+        case kKeyAppMedia:      return KEYCODE_MEDIA_PLAY_PAUSE;  // 10 近似
+        case kKeyBrightnessDown: return KEYCODE_BRIGHTNESS_DOWN;  // 41
+        case kKeyBrightnessUp:  return KEYCODE_BRIGHTNESS_UP;     // 40
+        case kKeyWWWBack:       return KEYCODE_FORWARD;           // 2084 近似
+        case kKeyWWWForward:    return KEYCODE_FORWARDMAIL;       // 2654 近似
+        case kKeyWWWHome:       return KEYCODE_HOME;              // 1 近似
+        case kKeyWWWRefresh:    return KEYCODE_REFRESH;           // 2635
+    }
+
+    // 小键盘数字 0-9 与符号（Deskflow KeyID 0xEFB0..=KP_0，映射到 NUMPAD）
+    if (keysym >= kKeyKP_0 && keysym <= kKeyKP_9) {
+        return KEYCODE_NUMPAD_0 + static_cast<int32_t>(keysym - kKeyKP_0); // 2103+
+    }
+    switch (keysym) {
+        case kKeyKP_Enter:     return KEYCODE_NUMPAD_ENTER;   // 2119
+        case kKeyKP_Multiply:  return KEYCODE_NUMPAD_MULTIPLY;// 2114
+        case kKeyKP_Add:       return KEYCODE_NUMPAD_ADD;     // 2116
+        case kKeyKP_Separator: return KEYCODE_NUMPAD_COMMA;   // 2118
+        case kKeyKP_Subtract:  return KEYCODE_NUMPAD_SUBTRACT;// 2115
+        case kKeyKP_Decimal:   return KEYCODE_NUMPAD_DOT;     // 2117
+        case kKeyKP_Divide:    return KEYCODE_NUMPAD_DIVIDE;  // 2113
+        case kKeyKP_Equal:     return KEYCODE_NUMPAD_EQUALS;  // 2120
+        case kKeyKP_Home:      return KEYCODE_MOVE_HOME;      // 2081
+        case kKeyKP_End:       return KEYCODE_MOVE_END;       // 2082
+        case kKeyKP_PageUp:    return KEYCODE_PAGE_UP;        // 2068
+        case kKeyKP_PageDown:  return KEYCODE_PAGE_DOWN;      // 2069
+        case kKeyKP_Insert:    return KEYCODE_INSERT;         // 2083
+        case kKeyKP_Delete:    return KEYCODE_FORWARD_DEL;    // 2071
+    }
+
+    return -1;
 }
 
 int32_t buttonToHarmony(int32_t buttonId)
@@ -926,6 +1005,7 @@ bool DeskflowClient::injectKeyEvent(uint32_t keysym, bool down)
 {
     int32_t keyCode = keysymToKeycode(keysym);
     if (keyCode < 0) {
+        DF_LOGI("injectKeyEvent: unmapped keysym=0x%{public}x", keysym);
         return false;
     }
     struct Input_KeyEvent* ke = OH_Input_CreateKeyEvent();
@@ -937,9 +1017,8 @@ bool DeskflowClient::injectKeyEvent(uint32_t keysym, bool down)
     OH_Input_SetKeyEventActionTime(ke, -1);
     int32_t ret = OH_Input_InjectKeyEvent(ke);
     OH_Input_DestroyKeyEvent(&ke);
-    if (ret != INPUT_SUCCESS) {
-        DF_LOGE("injectKeyEvent(keysym=0x%{public}x,%{public}d) failed ret=%{public}d", keysym, down ? 1 : 0, ret);
-    }
+    DF_LOGI("injectKeyEvent keysym=0x%{public}x keyCode=%{public}d %{public}s ret=%{public}d",
+        keysym, keyCode, down ? "DOWN" : "UP", ret);
     return ret == INPUT_SUCCESS;
 }
 
