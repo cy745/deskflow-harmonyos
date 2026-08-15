@@ -27,6 +27,7 @@ export enum ConnState {
 const MENU_SHOW_MAIN = 'show_main';
 const MENU_CONNECT = 'connect';
 const MENU_DISCONNECT = 'disconnect';
+const MENU_EXIT = 'exit';
 
 /**
  * 管理状态栏托盘图标与菜单。
@@ -43,6 +44,7 @@ export class StatusBarManager {
   onConnectClick?: () => void;
   onDisconnectClick?: () => void;
   onShowMainClick?: () => void;
+  onExitClick?: () => void;
 
   private constructor() {
   }
@@ -239,6 +241,12 @@ export class StatusBarManager {
       };
       group.push(connect);
     }
+    const exit: statusBarManager.StatusBarMenuItem = {
+      title: '退出',
+      menuCode: MENU_EXIT,
+      menuAction: { abilityName: 'EntryAbility', notifyOnly: true }
+    };
+    group.push(exit);
     return [group];
   }
 
@@ -258,6 +266,9 @@ export class StatusBarManager {
         break;
       case MENU_SHOW_MAIN:
         if (this.onShowMainClick) { this.onShowMainClick(); }
+        break;
+      case MENU_EXIT:
+        if (this.onExitClick) { this.onExitClick(); }
         break;
       default:
         break;

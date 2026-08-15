@@ -22,6 +22,8 @@ import { StatusBarManager, ConnState } from '../statusbar/StatusBarManager';
 const DOMAIN = 0x0000;
 
 export default class EntryAbility extends UIAbility {
+  private mainWindow: window.Window | null = null;
+
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     try {
       this.context.getApplicationContext().setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET);
@@ -32,13 +34,20 @@ export default class EntryAbility extends UIAbility {
     try {
       const sb = StatusBarManager.getInstance();
       sb.init(this.context);
-      // 托盘菜单「打开主界面」：拉起 EntryAbility 恢复主窗口
+      // 托盘菜单「打开主界面」：恢复主窗口（若隐藏到托盘则重新显示）
       sb.onShowMainClick = () => {
-        this.context.startAbility({
-          bundleName: 'com.deskflow.ohospoc',
-          abilityName: 'EntryAbility'
-        }).catch((e: BusinessError) => {
-          hilog.error(DOMAIN, 'DeskflowStatusBar', 'start main failed: %{public}s', JSON.stringify(e));
+        hilog.info(DOMAIN, 'DeskflowStatusBar', 'show main window');
+        this.showMainWindow().catch((e: BusinessError) => {
+          hilog.error(DOMAIN, 'DeskflowStatusBar', 'show main failed: %{public}s', JSON.stringify(e));
+        });
+      };
+      // 托盘菜单「退出」：真正终止应用
+      // 注意：直接 terminateSelf 会走 onWindowStageDestroy/onDestroy；若想先停掉截图/连接，
+      // 依赖 onDestroy 清理即可。这里直接退出进程。
+      sb.onExitClick = () => {
+        hilog.info(DOMAIN, 'DeskflowStatusBar', 'user exit via tray');
+        this.context.terminateSelf().catch((e: BusinessError) => {
+          hilog.error(DOMAIN, 'DeskflowStatusBar', 'terminateSelf failed: %{public}s', JSON.stringify(e));
         });
       };
       // 延迟到窗口就绪后加入
@@ -63,6 +72,49 @@ export default class EntryAbility extends UIAbility {
         return;
       }
       hilog.info(DOMAIN, 'testTag', 'Succeeded in loading the content.');
+    });
+
+    // 记录主窗口，并点击系统标题栏「关闭」按钮 → 隐藏到托盘（不退出），
+    // 直到托盘菜单「退出」才真正终止。
+    try {
+      this.mainWindow = windowStage.getMainWindowSync();
+    } catch (e) {
+      hilog.warn(DOMAIN, 'DeskflowTray', 'get main window fail: %{public}s', JSON.stringify(e));
+      return;
+    }
+
+    // windowWillClose @since 15：resolve(true)=阻止关闭(保持窗口)，resolve(false)=继续关闭。
+    // 用 hideAbility() 真正隐藏窗口到托盘（PC/2in1/Tablet），应用进程与托盘保持存活。
+    // 注意：不要同时注册 windowStageClose（会被忽略）。
+    try {
+      this.mainWindow.on('windowWillClose', (): Promise<boolean> => {
+        hilog.info(DOMAIN, 'DeskflowTray', 'windowWillClose -> hide to tray');
+        try {
+          this.context.hideAbility();
+        } catch (e) {
+          hilog.warn(DOMAIN, 'DeskflowTray', 'hideAbility fail: %{public}s', JSON.stringify(e));
+          // 回退：最小化到任务栏，避免关闭
+          try { this.mainWindow?.minimize(); } catch (e2) { /* ignore */ }
+        }
+        return Promise.resolve(true); // 阻止关闭，窗口隐藏到托盘
+      });
+    } catch (e) {
+      hilog.warn(DOMAIN, 'DeskflowTray', 'windowWillClose register fail: %{public}s', JSON.stringify(e));
+    }
+  }
+
+  /** 从托盘/后台恢复主窗口 */
+  private async showMainWindow(): Promise<void> {
+    try {
+      await this.context.showAbility();
+      return;
+    } catch (e) {
+      hilog.warn(DOMAIN, 'DeskflowTray', 'showAbility fail: %{public}s', JSON.stringify(e));
+    }
+    // 兜底：拉起新的 Ability 实例
+    await this.context.startAbility({
+      bundleName: 'com.deskflow.ohospoc',
+      abilityName: 'EntryAbility'
     });
   }
 
