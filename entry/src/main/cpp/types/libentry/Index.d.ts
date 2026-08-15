@@ -31,3 +31,4 @@ export const injectKey: (keyCode: number) => string;
 export const onDeskflowStatus: (callback: (event: ValueChangeEvent) => void) => void;
 export const connectDeskflow: (host: string, port: number, name: string, screenW: number, screenH: number) => string;
 export const disconnectDeskflow: () => string;
+export const setInvertScroll: (invert: boolean) => string;

@@ -690,6 +690,10 @@ bool DeskflowClient::injectMouseWheel(int32_t xDelta, int32_t yDelta)
     if (yDelta == 0 && xDelta == 0) {
         return true;
     }
+    // 反转滚轮方向：垂直滚轮取反（作用于 yDelta）
+    if (m_invertScroll.load() && yDelta != 0) {
+        yDelta = -yDelta;
+    }
     int32_t x = m_pointerX.load();
     int32_t y = m_pointerY.load();
     int32_t axisType = (yDelta != 0) ? MOUSE_AXIS_SCROLL_VERTICAL : MOUSE_AXIS_SCROLL_HORIZONTAL;

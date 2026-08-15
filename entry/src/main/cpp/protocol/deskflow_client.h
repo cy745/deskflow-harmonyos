@@ -50,6 +50,9 @@ public:
         m_screenH = h;
     }
 
+    // 反转滚轮方向：true 时注入的垂直滚轮取反（配合系统滚轮方向偏好）。
+    void setInvertScroll(bool invert) { m_invertScroll = invert; }
+
     // Request stop and disconnect (non-blocking; worker thread detaches)
     void stop();
 
@@ -84,6 +87,8 @@ private:
     // 自动重连
     std::atomic<bool> m_autoReconnect{false};
     std::atomic<int32_t> m_reconnectIntervalMs{3000};
+    // 是否反转滚轮方向（垂直滚轮取反）
+    std::atomic<bool> m_invertScroll{false};
     // 本次断开是否应重连：连接丢失/协议错误 → true（默认）；
     // 收到 CBYE（服务端主动关闭）或 EICV（版本不兼容）→ false（不重连）
     std::atomic<bool> m_shouldReconnect{true};

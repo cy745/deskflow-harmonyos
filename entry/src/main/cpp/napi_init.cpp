@@ -145,6 +145,21 @@ static napi_value DisconnectDeskflow(napi_env env, napi_callback_info info)
     return result;
 }
 
+// setInvertScroll(invert): 反转滚轮方向（垂直滚轮取反）
+static napi_value SetInvertScroll(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    bool invert = false;
+    napi_get_value_bool(env, args[0], &invert);
+    g_deskflowClient.setInvertScroll(invert);
+    napi_value result;
+    napi_create_string_utf8(env, invert ? "invert scroll ON" : "invert scroll OFF",
+        invert ? 15 : 16, &result);
+    return result;
+}
+
 napi_threadsafe_function g_tsfn = nullptr;
 // ThreadSafeFunction 回调：在 JS 线程执行，把事件值传给 ArkTS 侧
 void CallJsOnThread(napi_env env, napi_value js_cb, void* context, void* data)
@@ -687,6 +702,7 @@ static napi_value Init(napi_env env, napi_value exports)
         { "onDeskflowStatus", nullptr, OnDeskflowStatus, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "connectDeskflow", nullptr, ConnectDeskflow, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "disconnectDeskflow", nullptr, DisconnectDeskflow, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "setInvertScroll", nullptr, SetInvertScroll, nullptr, nullptr, nullptr, napi_default, nullptr },
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;
