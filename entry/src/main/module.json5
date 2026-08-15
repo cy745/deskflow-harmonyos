@@ -67,6 +67,13 @@
             "resource": "$profile:backup_config"
           }
         ],
+      },
+      {
+        "name": "StatusBarViewAbility",
+        "description": "Deskflow 状态栏托盘快速操作",
+        "type": "statusBarView",
+        "exported": true,
+        "srcEntry": "./ets/statusbar/StatusBarViewAbility.ets"
       }
     ]
   }

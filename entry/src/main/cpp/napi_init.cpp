@@ -29,6 +29,7 @@
 static constexpr unsigned int DF_LOG_DOMAIN = 0xD002;
 static constexpr const char* DF_LOG_TAG = "DeskflowPoC";
 #define DF_LOGI(...) OH_LOG_Print(LOG_APP, LOG_INFO, DF_LOG_DOMAIN, DF_LOG_TAG, __VA_ARGS__)
+#define DF_LOGW(...) OH_LOG_Print(LOG_APP, LOG_WARN, DF_LOG_DOMAIN, DF_LOG_TAG, __VA_ARGS__)
 #define DF_LOGE(...) OH_LOG_Print(LOG_APP, LOG_ERROR, DF_LOG_DOMAIN, DF_LOG_TAG, __VA_ARGS__)
 
 static dfpoc::DeskflowClient g_deskflowClient;
@@ -66,6 +67,7 @@ void DeskflowStatusCb(const std::string& status)
         tsfn = g_statusTsfn;
     }
     if (tsfn == nullptr) {
+        DF_LOGW("DeskflowStatusCb: status callback not registered yet, drop '%{public}s'", status.c_str());
         return;
     }
     napi_call_threadsafe_function(tsfn, new std::string(status), napi_tsfn_nonblocking);
@@ -82,8 +84,13 @@ static napi_value OnDeskflowStatus(napi_env env, napi_callback_info info)
         napi_release_threadsafe_function(g_statusTsfn, napi_tsfn_release);
         g_statusTsfn = nullptr;
     }
-    napi_create_threadsafe_function(env, args[0], nullptr, nullptr, 0, 1, nullptr, nullptr, nullptr,
-        DeskflowStatusCallJs, &g_statusTsfn);
+    // Harmony/OpenHarmony 的 napi_create_threadsafe_function 要求 async_resource_name 为合法
+    // 字符串值（不能传 NULL），否则返回 napi_invalid_arg（status=1），导致状态回调永远发不到 JS。
+    napi_value resourceName = nullptr;
+    std::string resName = "deskflow.status";
+    napi_create_string_utf8(env, resName.c_str(), resName.size(), &resourceName);
+    napi_create_threadsafe_function(env, args[0], nullptr, resourceName, 0, 1,
+        nullptr, nullptr, nullptr, DeskflowStatusCallJs, &g_statusTsfn);
     return nullptr;
 }
 

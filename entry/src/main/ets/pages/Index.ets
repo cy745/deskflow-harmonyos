@@ -15,17 +15,18 @@
 
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { display } from '@kit.ArkUI';
+import { preferences } from '@kit.ArkData';
+import { common } from '@kit.AbilityKit';
 import deskflow from 'libentry.so';
+import { ConnState, StatusBarManager } from '../statusbar/StatusBarManager';
+import { desktopManager } from '../statusbar/DeskflowStatusStore';
 
 const DOMAIN = 0x0000;
-
-// 连接状态
-enum ConnState {
-  DISCONNECTED = 0, // 未连接
-  CONNECTING = 1,   // 连接中 / 重连中
-  CONNECTED = 2,    // 已连接（含进入屏幕控制）
-  ERROR = 3         // 异常断开 / 出错
-}
+const PREFS_NAME = 'deskflow_config';
+const PREFS_HOST = 'host';
+const PREFS_PORT = 'port';
+const PREFS_NAME_FIELD = 'client_name';
+const PREFS_INVERT = 'invert_scroll';
 
 function stateColor(state: number): string {
   switch (state) {
@@ -50,7 +51,7 @@ function stateLabel(state: number): string {
 struct Index {
   @State connState: number = ConnState.DISCONNECTED;
   @State statusText: string = '尚未连接 Deskflow 服务端';
-  @State hostInput: string = '10.0.0.10';
+  @State hostInput: string = '';
   @State portInput: string = '24800';
   @State screenName: string = 'HarmonyPC';
   @State invertScroll: boolean = false;
@@ -83,13 +84,57 @@ struct Index {
   }
 
   aboutToAppear(): void {
+    // 托盘菜单回调
+    const sb = StatusBarManager.getInstance();
+    sb.onConnectClick = () => this.onConnect();
+    sb.onDisconnectClick = () => this.onDisconnect();
     // 监听连接状态（worker 线程通过 NAPI 线程安全函数回投）
     deskflow.onDeskflowStatus((event: deskflow.ValueChangeEvent) => {
       this.statusText = event.value;
       this.connState = this.mapStatus(event.value);
+      this.syncTray();
     });
-    // 滚轮反转开关默认值（可从偏好读取，先默认关）
-    this.invertScroll = false;
+    // 回填上次保存的连接配置
+    this.loadPrefs();
+  }
+
+  /** 读取上次保存的连接配置（host/port/name/滚轮反转） */
+  private loadPrefs(): void {
+    try {
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      preferences.getPreferences(context, PREFS_NAME).then((pref: preferences.Preferences) => {
+        this.hostInput = pref.getSync(PREFS_HOST, '') as string;
+        this.portInput = pref.getSync(PREFS_PORT, '24800') as string;
+        this.screenName = pref.getSync(PREFS_NAME_FIELD, 'HarmonyPC') as string;
+        this.invertScroll = pref.getSync(PREFS_INVERT, false) as boolean;
+      }).catch((e: Error) => {
+        hilog.error(DOMAIN, 'DeskflowPrefs', 'load prefs fail: %{public}s', e.message);
+      });
+    } catch (err) {
+      hilog.error(DOMAIN, 'DeskflowPrefs', 'load pref error: %{public}s', JSON.stringify(err));
+    }
+  }
+
+  /** 保存连接配置（下次启动自动回填） */
+  private savePrefs(): void {
+    try {
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      preferences.getPreferences(context, PREFS_NAME).then((pref: preferences.Preferences) => {
+        pref.putSync(PREFS_HOST, this.hostInput);
+        pref.putSync(PREFS_PORT, this.portInput);
+        pref.putSync(PREFS_NAME_FIELD, this.screenName);
+        pref.putSync(PREFS_INVERT, this.invertScroll);
+        pref.flush();
+      });
+    } catch (err) {
+      hilog.error(DOMAIN, 'DeskflowPrefs', 'save pref error: %{public}s', JSON.stringify(err));
+    }
+  }
+
+  private syncTray(): void {
+    // 更新托盘图标/菜单 + 共享状态（供工具栏快速操作弹窗显示）
+    desktopManager.setState(this.connState, this.statusText);
+    StatusBarManager.getInstance().updateState(this.connState);
   }
 
   @Builder
@@ -186,6 +231,7 @@ struct Index {
             } catch (e) {
               this.statusText = `设置滚轮反转失败: ${JSON.stringify(e)}`;
             }
+            this.savePrefs();
           })
       }
       .width('100%')
@@ -207,10 +253,12 @@ struct Index {
       deskflow.setInvertScroll(this.invertScroll);
       this.statusText = deskflow.connectDeskflow(this.hostInput, Number(this.portInput), this.screenName, w, h);
       this.connState = ConnState.CONNECTING;
+      this.savePrefs();
     } catch (e) {
       this.statusText = `连接失败: ${JSON.stringify(e)}`;
       this.connState = ConnState.ERROR;
     }
+    this.syncTray();
   }
 
   onDisconnect(): void {
@@ -220,6 +268,7 @@ struct Index {
     } catch (e) {
       this.statusText = `断开失败: ${JSON.stringify(e)}`;
     }
+    this.syncTray();
   }
 
   build() {

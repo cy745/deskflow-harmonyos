@@ -16,6 +16,8 @@
 import { AbilityConstant, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
+import { BusinessError } from '@kit.BasicServicesKit';
+import { StatusBarManager, ConnState } from '../statusbar/StatusBarManager';
 
 const DOMAIN = 0x0000;
 
@@ -25,6 +27,24 @@ export default class EntryAbility extends UIAbility {
       this.context.getApplicationContext().setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET);
     } catch (err) {
       hilog.error(DOMAIN, 'testTag', 'Failed to set colorMode. Cause: %{public}s', JSON.stringify(err));
+    }
+    // 初始化状态栏托盘（桌面扩展，2in1 生效）
+    try {
+      const sb = StatusBarManager.getInstance();
+      sb.init(this.context);
+      // 托盘菜单「打开主界面」：拉起 EntryAbility 恢复主窗口
+      sb.onShowMainClick = () => {
+        this.context.startAbility({
+          bundleName: 'com.deskflow.ohospoc',
+          abilityName: 'EntryAbility'
+        }).catch((e: BusinessError) => {
+          hilog.error(DOMAIN, 'DeskflowStatusBar', 'start main failed: %{public}s', JSON.stringify(e));
+        });
+      };
+      // 延迟到窗口就绪后加入
+      sb.add();
+    } catch (err) {
+      hilog.error(DOMAIN, 'DeskflowStatusBar', 'tray init failed: %{public}s', JSON.stringify(err));
     }
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onCreate');
   }
