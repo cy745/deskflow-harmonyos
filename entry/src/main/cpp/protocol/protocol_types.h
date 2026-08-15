@@ -110,6 +110,18 @@ constexpr uint32_t kKeySuperR       = 0xEFEC;
 constexpr uint32_t kKeyF1           = 0xEFBE;
 constexpr uint32_t kKeyF12          = 0xEFC9;
 
+// 小键盘（keypad）键：Deskflow KeyID（X11 keysym - 0x1000），见 KeyTypes.h
+constexpr uint32_t kKeyKpEnter    = 0xEF8D;
+constexpr uint32_t kKeyKpMultiply = 0xEFAA;
+constexpr uint32_t kKeyKpAdd      = 0xEFAB;
+constexpr uint32_t kKeyKpSeparator = 0xEFAC; // 常为逗号
+constexpr uint32_t kKeyKpSubtract = 0xEFAD;
+constexpr uint32_t kKeyKpDecimal  = 0xEFAE;
+constexpr uint32_t kKeyKpDivide   = 0xEFAF;
+constexpr uint32_t kKeyKp0        = 0xEFB0;
+constexpr uint32_t kKeyKp9        = 0xEFB9;
+constexpr uint32_t kKeyKpEqual    = 0xEFBD;
+
 // Mouse button ids (protocol)
 constexpr int32_t kButtonLeft   = 1;
 constexpr int32_t kButtonMiddle = 2;

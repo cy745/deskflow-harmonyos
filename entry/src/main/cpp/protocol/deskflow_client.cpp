@@ -60,6 +60,10 @@ int32_t keysymToKeycode(uint32_t keysym)
     if (keysym >= kKeyF1 && keysym <= kKeyF12) {
         return 2090 + static_cast<int32_t>(keysym - kKeyF1);
     }
+    // 小键盘数字 0-9（KEYCODE_NUMPAD_0=2103 .. KEYCODE_NUMPAD_9=2112）
+    if (keysym >= kKeyKp0 && keysym <= kKeyKp9) {
+        return 2103 + static_cast<int32_t>(keysym - kKeyKp0);
+    }
     switch (keysym) {
         case kKeyReturn:    return 2054; // KEYCODE_ENTER
         case kKeyBackSpace: return 2055; // KEYCODE_DEL (backspace)
@@ -89,6 +93,15 @@ int32_t keysymToKeycode(uint32_t keysym)
         case kKeyNumLock:   return 2102;
         case kKeyScrollLock: return 2075;
         case kKeyPrintScreen: return 2079; // KEYCODE_SYSRQ
+        // 小键盘符号键
+        case kKeyKpEnter:    return 2119; // KEYCODE_NUMPAD_ENTER
+        case kKeyKpMultiply: return 2114; // KEYCODE_NUMPAD_MULTIPLY
+        case kKeyKpAdd:      return 2116; // KEYCODE_NUMPAD_ADD
+        case kKeyKpSeparator: return 2118; // KEYCODE_NUMPAD_COMMA
+        case kKeyKpSubtract: return 2115; // KEYCODE_NUMPAD_SUBTRACT
+        case kKeyKpDecimal:  return 2117; // KEYCODE_NUMPAD_DOT
+        case kKeyKpDivide:   return 2113; // KEYCODE_NUMPAD_DIVIDE
+        case kKeyKpEqual:    return 2120; // KEYCODE_NUMPAD_EQUALS
         case 0x2C: return 2043; // comma
         case 0x2E: return 2044; // period
         case 0x2D: return 2057; // minus
