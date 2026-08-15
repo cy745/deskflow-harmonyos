@@ -38,10 +38,6 @@ static napi_threadsafe_function g_statusTsfn = nullptr;
 // （worker 线程/MMI 回调线程 与 JS 线程并发）
 static std::mutex g_tsfnMutex;
 
-// 前向声明：事件拦截器自动注册（定义在文件后半部分），ConnectDeskflow 中调用
-void AutoRegisterEventInterceptor();
-static bool g_eventInterceptorAdded = false;
-
 void DeskflowStatusCallJs(napi_env env, napi_value js_cb, void* context, void* data)
 {
     std::string* value = static_cast<std::string*>(data);
@@ -121,10 +117,6 @@ static napi_value ConnectDeskflow(napi_env env, napi_callback_info info)
     g_deskflowClient.setScreenSize(screenW, screenH);
     bool started = g_deskflowClient.start(hostBuf, static_cast<uint16_t>(port), nameBuf);
     DF_LOGI("connectDeskflow: started=%{public}d", started ? 1 : 0);
-
-    // 自动注册输入事件拦截器（诊断用）：把真实鼠标/触摸/轴事件序列打到 hilog，
-    // 用于对比"真实拖动"与"注入拖动"的事件差异
-    AutoRegisterEventInterceptor();
 
     std::string message = started ? "client starting: " + std::string(hostBuf) + ":" + std::to_string(port)
                                   : "client already running";
@@ -404,20 +396,6 @@ void OnAxisEventCallback(const Input_AxisEvent* axisEvent)
 
 // 输入事件回调函数结构体
 Input_InterceptorEventCallback g_eventCallback;
-
-// 自动注册输入事件拦截器（诊断用）：把真实鼠标/触摸/轴事件序列打到 hilog
-void AutoRegisterEventInterceptor()
-{
-    if (g_eventInterceptorAdded) {
-        return;
-    }
-    g_eventCallback.mouseCallback = OnMouseEventCallback;
-    g_eventCallback.touchCallback = OnTouchEventCallback;
-    g_eventCallback.axisCallback = OnAxisEventCallback;
-    Input_Result ret = OH_Input_AddInputEventInterceptor(&g_eventCallback, nullptr);
-    DF_LOGI("auto add input event interceptor ret=%{public}d", ret);
-    g_eventInterceptorAdded = (ret == INPUT_SUCCESS);
-}
 
 static napi_value AddEventInterceptor(napi_env env, napi_callback_info info)
 {

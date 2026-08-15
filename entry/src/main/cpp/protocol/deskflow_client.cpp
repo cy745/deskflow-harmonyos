@@ -22,7 +22,17 @@ namespace {
 constexpr unsigned int DF_LOG_DOMAIN = 0xD002;
 constexpr const char* DF_LOG_TAG = "DeskflowPoC";
 
+// 诊断日志开关：编译期宏，1 输出每条消息的 INFO 级 recv 日志（高频，调协议时用），
+// 0 仅保留 ERROR / 有限 INFO，避免正常使用时刷屏。
+#define DF_VERBOSE_MESSAGE_LOG 0
+
 #define DF_LOGI(...) OH_LOG_Print(LOG_APP, LOG_INFO, DF_LOG_DOMAIN, DF_LOG_TAG, __VA_ARGS__)
+#define DF_LOGD(...)                                                     \
+    do {                                                                 \
+        if (DF_VERBOSE_MESSAGE_LOG) {                                    \
+            OH_LOG_Print(LOG_APP, LOG_DEBUG, DF_LOG_DOMAIN, DF_LOG_TAG, __VA_ARGS__); \
+        }                                                                \
+    } while (0)
 #define DF_LOGE(...) OH_LOG_Print(LOG_APP, LOG_ERROR, DF_LOG_DOMAIN, DF_LOG_TAG, __VA_ARGS__)
 
 // 注入授权异步回调（MMI IPC 线程）
@@ -191,7 +201,7 @@ void DeskflowClient::run()
             break;
         }
         std::string key(reinterpret_cast<char*>(head), 4);
-        DF_LOGI("recv: %{public}s (frame %{public}zu, bufRemain %{public}zu)",
+        DF_LOGD("recv: %{public}s (frame %{public}zu, bufRemain %{public}zu)",
             key.c_str(), frame.size(), m_stream.bufferRemaining());
         keepGoing = handleMessage(key);
         // 运行期每条消息处理完后回 CNOP（deskflow client 的 BSD 延迟 ACK 绕开 hack）
@@ -267,7 +277,7 @@ bool DeskflowClient::handleMessage(const std::string& key)
     }
     if (key == kMsgCKeepAlive) {
         bool ok = m_stream.writeFrame(reinterpret_cast<const uint8_t*>("CALV"), 4);
-        DF_LOGI("CALV heartbeat replied=%{public}d", ok ? 1 : 0);
+        DF_LOGD("CALV heartbeat replied=%{public}d", ok ? 1 : 0);
         return ok;
     }
     if (key == "CINN") {
@@ -425,18 +435,24 @@ bool DeskflowClient::handleMessage(const std::string& key)
     }
     if (key == "CSEC") {
         uint8_t on = 0;
-        ProtoUtil::readf(m_stream, kMsgCScreenSaver + 4, &on);
+        if (!ProtoUtil::readf(m_stream, kMsgCScreenSaver + 4, &on)) {
+            return false;
+        }
         return true;
     }
     if (key == "CCLP") {
         uint8_t id = 0;
         uint32_t seq = 0;
-        ProtoUtil::readf(m_stream, kMsgCClipboard + 4, &id, &seq);
+        if (!ProtoUtil::readf(m_stream, kMsgCClipboard + 4, &id, &seq)) {
+            return false;
+        }
         return true;
     }
     if (key == "DSOP") {
         std::vector<uint32_t> options;
-        ProtoUtil::readf(m_stream, kMsgDSetOptions + 4, &options);
+        if (!ProtoUtil::readf(m_stream, kMsgDSetOptions + 4, &options)) {
+            return false;
+        }
         // DSOP 是握手完成的标志：此后进入运行期（每条消息后回 CNOP）
         m_handshakeDone = true;
         DF_LOGI("DSOP received, handshake complete, entering runtime");
@@ -447,19 +463,25 @@ bool DeskflowClient::handleMessage(const std::string& key)
         uint32_t seq = 0;
         uint8_t mark = 0;
         std::string data;
-        ProtoUtil::readf(m_stream, kMsgDClipboard + 4, &id, &seq, &mark, &data);
+        if (!ProtoUtil::readf(m_stream, kMsgDClipboard + 4, &id, &seq, &mark, &data)) {
+            return false;
+        }
         return true;
     }
     if (key == "DFTR") {
         uint8_t mark = 0;
         std::string data;
-        ProtoUtil::readf(m_stream, kMsgDFileTransfer + 4, &mark, &data);
+        if (!ProtoUtil::readf(m_stream, kMsgDFileTransfer + 4, &mark, &data)) {
+            return false;
+        }
         return true;
     }
     if (key == "DDRG") {
         int16_t fileCount = 0;
         std::string info;
-        ProtoUtil::readf(m_stream, kMsgDDragInfo + 4, &fileCount, &info);
+        if (!ProtoUtil::readf(m_stream, kMsgDDragInfo + 4, &fileCount, &info)) {
+            return false;
+        }
         return true;
     }
     if (key == "LSYN") {
@@ -472,14 +494,18 @@ bool DeskflowClient::handleMessage(const std::string& key)
     }
     if (key == "SECN") {
         std::string data;
-        ProtoUtil::readf(m_stream, kMsgDSecureInputNotification + 4, &data);
+        if (!ProtoUtil::readf(m_stream, kMsgDSecureInputNotification + 4, &data)) {
+            return false;
+        }
         return true;
     }
 
     // ---- errors ----
     if (key == "EICV") {
         int16_t a = 0, b = 0;
-        ProtoUtil::readf(m_stream, kMsgEIncompatible + 4, &a, &b);
+        if (!ProtoUtil::readf(m_stream, kMsgEIncompatible + 4, &a, &b)) {
+            return false;
+        }
         setStatus("error: incompatible version, server wants " + std::to_string(a) + "." + std::to_string(b));
         return false;
     }
