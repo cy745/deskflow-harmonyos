@@ -41,15 +41,7 @@ export default class EntryAbility extends UIAbility {
           hilog.error(DOMAIN, 'DeskflowStatusBar', 'show main failed: %{public}s', JSON.stringify(e));
         });
       };
-      // 托盘菜单「退出」：真正终止应用
-      // 注意：直接 terminateSelf 会走 onWindowStageDestroy/onDestroy；若想先停掉截图/连接，
-      // 依赖 onDestroy 清理即可。这里直接退出进程。
-      sb.onExitClick = () => {
-        hilog.info(DOMAIN, 'DeskflowStatusBar', 'user exit via tray');
-        this.context.terminateSelf().catch((e: BusinessError) => {
-          hilog.error(DOMAIN, 'DeskflowStatusBar', 'terminateSelf failed: %{public}s', JSON.stringify(e));
-        });
-      };
+      // 系统右键菜单自带「退出」，无需自定义 onExitClick。
       // 延迟到窗口就绪后加入
       sb.add();
     } catch (err) {
