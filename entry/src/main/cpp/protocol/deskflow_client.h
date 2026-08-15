@@ -85,7 +85,7 @@ private:
     StatusCallback m_statusCb;
 
     // 自动重连
-    std::atomic<bool> m_autoReconnect{false};
+    std::atomic<bool> m_autoReconnect{true};
     std::atomic<int32_t> m_reconnectIntervalMs{3000};
     // 是否反转滚轮方向（垂直滚轮取反）
     std::atomic<bool> m_invertScroll{false};

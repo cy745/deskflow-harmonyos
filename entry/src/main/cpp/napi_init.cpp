@@ -131,7 +131,7 @@ static napi_value ConnectDeskflow(napi_env env, napi_callback_info info)
     }
     g_deskflowClient.setStatusCallback(DeskflowStatusCb);
     g_deskflowClient.setScreenSize(screenW, screenH);
-    g_deskflowClient.setAutoReconnect(true, 3000);  // 心跳/运行时断开自动重连（3s 间隔）
+    // 是否自动重连由桌面侧通过 setAutoReconnect 控制（默认开启，这里不覆盖）
     bool started = g_deskflowClient.start(hostBuf, static_cast<uint16_t>(port), nameBuf);
     DF_LOGI("connectDeskflow: started=%{public}d", started ? 1 : 0);
 
@@ -164,6 +164,21 @@ static napi_value SetInvertScroll(napi_env env, napi_callback_info info)
     napi_value result;
     napi_create_string_utf8(env, invert ? "invert scroll ON" : "invert scroll OFF",
         invert ? 15 : 16, &result);
+    return result;
+}
+
+// setAutoReconnect(enable): 是否在连接意外断开后自动重连（worker 线程实时读取）
+static napi_value SetAutoReconnect(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    bool enable = true;
+    napi_get_value_bool(env, args[0], &enable);
+    g_deskflowClient.setAutoReconnect(enable, 3000);
+    napi_value result;
+    napi_create_string_utf8(env, enable ? "auto reconnect ON" : "auto reconnect OFF",
+        enable ? 17 : 18, &result);
     return result;
 }
 
@@ -710,6 +725,7 @@ static napi_value Init(napi_env env, napi_value exports)
         { "connectDeskflow", nullptr, ConnectDeskflow, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "disconnectDeskflow", nullptr, DisconnectDeskflow, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "setInvertScroll", nullptr, SetInvertScroll, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "setAutoReconnect", nullptr, SetAutoReconnect, nullptr, nullptr, nullptr, napi_default, nullptr },
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;

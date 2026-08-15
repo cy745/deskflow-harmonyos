@@ -27,6 +27,7 @@ const PREFS_HOST = 'host';
 const PREFS_PORT = 'port';
 const PREFS_NAME_FIELD = 'client_name';
 const PREFS_INVERT = 'invert_scroll';
+const PREFS_AUTORECONNECT = 'auto_reconnect';
 
 function stateColor(state: number): string {
   switch (state) {
@@ -55,6 +56,7 @@ struct Index {
   @State portInput: string = '24800';
   @State screenName: string = 'HarmonyPC';
   @State invertScroll: boolean = false;
+  @State autoReconnect: boolean = true; // 默认开启自动重连/启动自动连接
 
   // 根据服务端状态字符串推断连接状态
   private mapStatus(s: string): number {
@@ -98,7 +100,7 @@ struct Index {
     this.loadPrefs();
   }
 
-  /** 读取上次保存的连接配置（host/port/name/滚轮反转） */
+  /** 读取上次保存的连接配置（host/port/name/滚轮反转/自动重连） */
   private loadPrefs(): void {
     try {
       const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
@@ -107,6 +109,12 @@ struct Index {
         this.portInput = pref.getSync(PREFS_PORT, '24800') as string;
         this.screenName = pref.getSync(PREFS_NAME_FIELD, 'HarmonyPC') as string;
         this.invertScroll = pref.getSync(PREFS_INVERT, false) as boolean;
+        this.autoReconnect = pref.getSync(PREFS_AUTORECONNECT, true) as boolean;
+        // 启动自动连接：回填完配置后，若开启且地址可用，自动发起连接
+        if (this.autoReconnect && this.hostInput.trim().length > 0 && this.connState === ConnState.DISCONNECTED) {
+          hilog.info(DOMAIN, 'DeskflowPrefs', 'auto reconnect on launch, connecting...');
+          this.onConnect();
+        }
       }).catch((e: Error) => {
         hilog.error(DOMAIN, 'DeskflowPrefs', 'load prefs fail: %{public}s', e.message);
       });
@@ -124,6 +132,7 @@ struct Index {
         pref.putSync(PREFS_PORT, this.portInput);
         pref.putSync(PREFS_NAME_FIELD, this.screenName);
         pref.putSync(PREFS_INVERT, this.invertScroll);
+        pref.putSync(PREFS_AUTORECONNECT, this.autoReconnect);
         pref.flush();
       });
     } catch (err) {
@@ -236,6 +245,30 @@ struct Index {
       }
       .width('100%')
       .margin({ top: 12 })
+
+      Row() {
+        Text('自动重连/启动自动连接')
+          .fontSize(14)
+        Blank()
+        Toggle({ type: ToggleType.Switch, isOn: this.autoReconnect })
+          .selectedColor('#4CB050')
+          .onChange((isOn: boolean) => {
+            this.autoReconnect = isOn;
+            try {
+              this.statusText = deskflow.setAutoReconnect(isOn);
+            } catch (e) {
+              this.statusText = `设置自动重连失败: ${JSON.stringify(e)}`;
+            }
+            this.savePrefs();
+          })
+      }
+      .width('100%')
+      .margin({ top: 12 })
+      Text('开启后：应用启动时用上次配置自动连接；连接意外断开后自动重连。')
+        .fontSize(12)
+        .fontColor('#999999')
+        .width('100%')
+        .margin({ top: 4 })
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
@@ -246,11 +279,16 @@ struct Index {
 
   onConnect(): void {
     try {
+      if (this.hostInput.trim().length === 0) {
+        this.statusText = '请先填写服务端 IP/地址';
+        return;
+      }
       const d = display.getDefaultDisplaySync();
       const w = Math.round(d.width);
       const h = Math.round(d.height);
-      // 同步滚轮开关当前值
+      // 同步滚轮开关与自动重连开关
       deskflow.setInvertScroll(this.invertScroll);
+      deskflow.setAutoReconnect(this.autoReconnect);
       this.statusText = deskflow.connectDeskflow(this.hostInput, Number(this.portInput), this.screenName, w, h);
       this.connState = ConnState.CONNECTING;
       this.savePrefs();
@@ -263,6 +301,8 @@ struct Index {
 
   onDisconnect(): void {
     try {
+      // 手动断开视为用户主动停止，关闭自动重连避免立刻重连
+      deskflow.setAutoReconnect(false);
       this.statusText = deskflow.disconnectDeskflow();
       this.connState = ConnState.DISCONNECTED;
     } catch (e) {
