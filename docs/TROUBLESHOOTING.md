@@ -13,12 +13,9 @@
 **根因**
 - 穿越（cross-screen）剪贴板发送图像（DIB）数据时，服务端处理 **负 `biHeight`**（自顶向下的位图）发生越界/缓冲问题，属 Deskflow 上游缺陷。链接到上游 issue：[deskflow #9869](https://github.com/deskflow/deskflow/issues/9869)。
 
-**解决**
-- 服务端配置关闭剪贴板共享：
-  ```
-  clipboardSharing=false
-  ```
-- 客户端在 `DCLP` / `CCLP` 上只做"安全忽略"（读清负载、不上报、不触发服务端 DIB 处理），从而绕过崩溃路径。
+**当前状态**
+- 早期曾因该崩溃把服务端 `clipboardSharing=false` 关闭（`C:\Users\<user>\deskflow-server.conf`，即 `Deskflow.conf` 里 `externalConfigFile` 指向的那个外部配置）。
+- **现已重新开启** `clipboardSharing=true` 并实现客户端文本剪贴板同步。注意：**剪贴板上若复制了图像**，穿越仍可能触发该崩溃，故鸿蒙客户端只同步文本（format 0 / Text）；服务端使用时应避免在穿越时让图像留在剪贴板。
 
 ---
 
@@ -145,6 +142,31 @@ if (key == "LSYN") {
 
 **解决**
 - **收到 `DSOP`（握手完成）后进入运行期**，对每条处理完的消息回一条 `CNOP` 帧，把服务端"延迟 ACK 等待"绕过去。见 `PROTOCOL.md` §5。
+
+---
+
+## 10. 剪贴板同步：服务端→鸿蒙可用，鸿蒙→服务端受限
+
+**症状**
+- **服务端（Windows）→ 鸿蒙**：进入鸿蒙屏后，服务端剪贴板文本能同步到鸿蒙系统剪贴板（可用）。
+- **鸿蒙 → 服务端**：在鸿蒙端复制文本后，服务端拿不到（反向不可用）。
+
+**根因（为何 CCLP 会抑制服务端下推）**
+- 服务端在收到客户端 `CINN` 后会自动下推 `DCLP`；但若客户端**在 CINN 时主动发 `CCLP` 抓取**，`Server::handleClipboardGrabbed` 会把该客户端剪贴板 `m_dirty` 置 false 并清空服务端缓存，从而**抑制服务端的 DCLP 下推**。详见 deskflow `Server.cpp` / `ClientProxy1_6.cpp`。
+- 正确做法：**进入屏幕时静默等待**，服务端自动下推；`CCLP` 只在上传方向、本机剪贴板变化时发。
+
+**根因（鸿蒙 → 服务端读取受限）**
+- 鸿蒙读取系统剪贴板需要 `ohos.permission.READ_PASTEBOARD`，该权限 **`availableLevel = system_basic`（受限权限）**，需：
+  1. 在 AGC 申请 ACL（`allowed-acls` 加入该权限）。
+  2. 重新生成签名 `.p7b` Profile（否则 HAP 声明该权限会**安装失败 9568289**）。
+  3. `requestPermissionsFromUser` 运行时请求（PC 2in1 首次请求默认自动授权）。
+- 未授权时 `getDataSync().getPrimaryText()` 返回空、`hasDataSync()` 仍为 true（`has=1 mime=-1`）。
+- 因此**普通第三方签名应用无法静默读取其它 App 复制的剪贴板内容**，反向推送会静默跳过。
+
+**当前实现**
+- 开启「剪贴板同步」开关时尝试运行时请求 `READ_PASTEBOARD`；未授权则反向静默跳过（不崩溃、不回推）。
+- 接收方向（服务端→鸿蒙）不受影响。
+- 若按 AGC ACL + 重新签名的路径补齐 `READ_PASTEBOARD`，鸿蒙→服务端即可恢复。
 
 ---
 
