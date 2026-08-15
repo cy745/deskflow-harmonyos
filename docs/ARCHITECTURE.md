@@ -75,7 +75,9 @@ C++ 协议工作线程 / MMI IPC 回调线程不能直接操作 JS。桥接层�
 
 ### 3.3 诊断拦截器
 
-`AutoRegisterEventInterceptor` 把真实鼠标 / 触摸 / 轴事件打到 `hilog`，用于与注入事件做对比，定位注入差异（如 actionTime 坑）。
+页面提供「Add/Remove input event interceptor」按钮**显式开关**诊断拦截器：把真实鼠标 / 触摸 / 轴事件
+打到 `hilog`（并回投 `onChange` 展示），用于与注入事件做对比，定位注入差异（如 actionTime 坑）。
+为避免正常使用的持续刷屏，拦截器**不在连接时自动注册**，仅在用户点按钮时启用。
 
 ### 3.4 注入演示接口（独立于协议注入）
 
@@ -93,20 +95,24 @@ C++ 协议工作线程 / MMI IPC 回调线程不能直接操作 JS。桥接层�
   → connectDeskflow(host, port, name, screenW, screenH)
      ├─ g_deskflowClient.setScreenSize(w,h)    # vp 尺寸
      ├─ g_deskflowClient.setStatusCallback(...) # → g_statusTsfn 回投
+     ├─ g_deskflowClient.setAutoReconnect(true, 3000)  # 断线自动重连
      └─ g_deskflowClient.start(...)             # 启动后台工作线程
            │
-           ▼ (工作线程 run())
-   1. connect(host:24800) 非阻塞+select 超时
-   2. readFrame → Hello("%7s%2i%2i") 校验协议名/版本
-   3. writeFrame(HostBack)                # 携带 screenName
-   4. OH_Input_RequestInjection(...)      # 自动申请注入授权
-   5. 进入消息循环
+           ▼ (工作线程 run(): 外层重连循环)
+      while (!stop && shouldReconnect):
+        runOnce()   # 单次连接生命周期：
+        └─ connect(host:24800) 非阻塞+select 超时
+           → readFrame → Hello("%7s%2i%2i") 校验协议名/版本
+           → writeFrame(HostBack)   # 携带 screenName
+           → OH_Input_RequestInjection(...)  # 自动申请注入授权
+           → 消息循环
+      # 断开后：根据 runOnce 返回值 + 错误分类决定是否重连（默认 3s 间隔）
 ```
 
 ### 4.2 消息循环与分发
 
 ```
-while (not stopped):
+while (keepGoing && !stop):
     frame = readFrame()          # 4B NBO 长度 + payload
     key   = frame[0..4]          # 消息类型
     handled = handleMessage(key)  # 按字面量 key 分发，按格式读参
@@ -116,7 +122,9 @@ while (not stopped):
 - `handleMessage` 先读 4 字节 key，再依各消息格式读取参数（`kMsgXxx + 4` 跳过 key）。
 - `QINF → DINF`、`CALV → CALV`、`CINN → 移动指针 + 同步修饰键`、`DMMV/DMRM/DMDN/DMUP/DMWM/DKDN/DKUP/DKRP/DKDL` 做真实注入；
 - 剪贴板/文件/拖拽/屏保/选项等消息**安全忽略**（读清负载，保持流对齐）。
-- 错误消息（`EICV` / `EBSY` / `EUNK` / `EBAD`）置状态并终止循环。
+- 错误消息终止循环；错误分类决定是否自动重连：
+  - **可重连**（`m_shouldReconnect` 保持 `true`）：连接丢失、`EBSY`/`EUNK`/`EBAD`、`readf` 失败、connect/handshake 失败 → 按间隔自动重连。
+  - **不可重连**（`m_shouldReconnect = false`）：服务端主动关闭 `CBYE`、版本不兼容 `EICV`、Hello 主版本不匹配 → 停止重连并 `setStatus` 提示。
 
 ### 4.3 运行期确认
 
