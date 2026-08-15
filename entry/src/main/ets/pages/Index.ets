@@ -479,12 +479,7 @@ struct Index {
   onDisconnect(): void {
     try {
       // 通过 commonEvent 通知后台承载 Ability 断开并自行终止
-      const opts: commonEventManager.CommonEventPublishData = { data: 'stop' };
-      commonEventManager.publish(BGEVT_STOP, opts, (err) => {
-        if (err) {
-          hilog.warn(DOMAIN, 'DeskflowBg', 'stop publish fail: %{public}s', JSON.stringify(err));
-        }
-      });
+      this.requestBgStop();
       this.statusText = '正在断开连接...';
       this.connState = ConnState.DISCONNECTED;
       this.syncTray();
@@ -499,15 +494,36 @@ struct Index {
   private startBg(want: Want): void {
     const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
     try {
+      // 先停掉可能残留的旧承载进程，避免二次连接命中 16000068（已被占用）而连到旧目标
+      this.requestBgStop();
       const options: StartOptions = {
         processMode: 1, // contextConstant.ProcessMode.NEW_PROCESS_ATTACH_TO_PARENT
         startupVisibility: 0 // contextConstant.StartupVisibility.STARTUP_HIDE
       };
       context.startAbility(want, options).catch((e: BusinessError) => {
+        if (e.code === 16000068) {
+          // 承载已运行：旧实例正被请求停止，下一轮重新连接即可。
+          hilog.info(DOMAIN, 'DeskflowBg', 'carrier already running (16000068), will restart');
+          return;
+        }
         hilog.warn(DOMAIN, 'DeskflowBg', 'startAbility fail: %{public}s', JSON.stringify(e));
       });
     } catch (e) {
       hilog.warn(DOMAIN, 'DeskflowBg', 'startAbility error: %{public}s', JSON.stringify(e));
+    }
+  }
+
+  /** 通知后台承载 Ability 停止（终止旧连接进程） */
+  private requestBgStop(): void {
+    try {
+      const opts: commonEventManager.CommonEventPublishData = { data: 'stop' };
+      commonEventManager.publish(BGEVT_STOP, opts, (err) => {
+        if (err) {
+          hilog.warn(DOMAIN, 'DeskflowBg', 'stop publish fail: %{public}s', JSON.stringify(err));
+        }
+      });
+    } catch (e) {
+      hilog.warn(DOMAIN, 'DeskflowBg', 'requestBgStop error: %{public}s', JSON.stringify(e));
     }
   }
 
