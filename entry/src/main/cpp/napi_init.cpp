@@ -145,7 +145,6 @@ static napi_value DisconnectDeskflow(napi_env env, napi_callback_info info)
     return result;
 }
 
-napi_env g_env = nullptr;
 napi_threadsafe_function g_tsfn = nullptr;
 // ThreadSafeFunction 回调：在 JS 线程执行，把事件值传给 ArkTS 侧
 void CallJsOnThread(napi_env env, napi_value js_cb, void* context, void* data)
@@ -184,7 +183,6 @@ void PublishValue(const std::string& text)
 
 napi_value OnChange(napi_env env, napi_callback_info info)
 {
-    g_env = env;
     size_t argc = 1;
     napi_value args[1];
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
