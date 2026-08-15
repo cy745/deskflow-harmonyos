@@ -59,7 +59,7 @@ struct Index {
   @State screenName: string = 'HarmonyPC';
   @State invertScroll: boolean = false;
   @State autoReconnect: boolean = true; // 默认开启自动重连/启动自动连接
-  @State clipboardSync: boolean = false; // 默认关闭剪贴板同步（涉及系统剪贴板权限）
+  @State clipboardSync: boolean = true; // 默认开启剪贴板同步
   // 剪贴板桥接：避免把刚写入的本机内容又当成本机新复制推回去（回环）
   private lastRemoteClipboard: string = '';
 
@@ -113,6 +113,7 @@ struct Index {
     });
     // 监听远程剪贴板文本到达：写入系统剪贴板
     deskflow.onClipboardData((event: deskflow.ValueChangeEvent) => {
+      hilog.info(DOMAIN, 'DeskflowClip', 'recv remote clip len=%{public}d', event.value.length);
       this.lastRemoteClipboard = event.value;
       this.setSystemClipboard(event.value);
     });
@@ -130,7 +131,7 @@ struct Index {
         this.screenName = pref.getSync(PREFS_NAME_FIELD, 'HarmonyPC') as string;
         this.invertScroll = pref.getSync(PREFS_INVERT, false) as boolean;
         this.autoReconnect = pref.getSync(PREFS_AUTORECONNECT, true) as boolean;
-        this.clipboardSync = pref.getSync(PREFS_CLIPBOARD, false) as boolean;
+        this.clipboardSync = pref.getSync(PREFS_CLIPBOARD, true) as boolean;
         // 启动自动连接：回填完配置后，若开启且地址可用，自动发起连接
         if (this.autoReconnect && this.hostInput.trim().length > 0 && this.connState === ConnState.DISCONNECTED) {
           hilog.info(DOMAIN, 'DeskflowPrefs', 'auto reconnect on launch, connecting...');
@@ -186,10 +187,13 @@ struct Index {
   private setSystemClipboard(value: string): void {
     try {
       if (!this.clipboardSync || !value || value.length === 0) {
+        hilog.warn(DOMAIN, 'DeskflowClip', 'setSystemClipboard skip (sync=%{public}d len=%{public}d)',
+          this.clipboardSync ? 1 : 0, value ? value.length : 0);
         return;
       }
       const data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, value);
       pasteboard.getSystemPasteboard().setDataSync(data);
+      hilog.info(DOMAIN, 'DeskflowClip', 'wrote system clipboard len=%{public}d', value.length);
     } catch (e) {
       hilog.warn(DOMAIN, 'DeskflowClip', 'set clipboard fail: %{public}s', JSON.stringify(e));
     }
