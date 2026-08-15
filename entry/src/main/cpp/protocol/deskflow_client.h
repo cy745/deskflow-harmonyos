@@ -55,8 +55,16 @@ public:
 
     bool isRunning() const { return m_running.load(); }
 
+    // 自动重连策略：连接意外断开后自动重连，直到成功或收到不可重连指示/stop。
+    void setAutoReconnect(bool enable, int32_t intervalMs = 3000)
+    {
+        m_autoReconnect = enable;
+        m_reconnectIntervalMs = intervalMs;
+    }
+
 private:
-    void run();                              // worker thread: connect + handshake + message loop
+    void run();                              // worker thread: (re)connect loop
+    bool runOnce();                          // one connect→handshake→message-loop lifecycle
     bool handshake();                        // Barrier Hello/HelloBack exchange
     bool handleMessage(const std::string& key);  // dispatch one 4-byte protocol message key
     void setStatus(const std::string& s);    // notify status callback (worker thread)
@@ -72,6 +80,13 @@ private:
     std::thread m_thread;
     SocketStream m_stream;
     StatusCallback m_statusCb;
+
+    // 自动重连
+    std::atomic<bool> m_autoReconnect{false};
+    std::atomic<int32_t> m_reconnectIntervalMs{3000};
+    // 本次断开是否应重连：连接丢失/协议错误 → true（默认）；
+    // 收到 CBYE（服务端主动关闭）或 EICV（版本不兼容）→ false（不重连）
+    std::atomic<bool> m_shouldReconnect{true};
 
     std::string m_host;
     uint16_t m_port;

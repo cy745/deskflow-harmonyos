@@ -115,6 +115,7 @@ static napi_value ConnectDeskflow(napi_env env, napi_callback_info info)
         g_deskflowClient.isRunning() ? 1 : 0, hostBuf, port, screenW, screenH);
     g_deskflowClient.setStatusCallback(DeskflowStatusCb);
     g_deskflowClient.setScreenSize(screenW, screenH);
+    g_deskflowClient.setAutoReconnect(true, 3000);  // 心跳/运行时断开自动重连（3s 间隔）
     bool started = g_deskflowClient.start(hostBuf, static_cast<uint16_t>(port), nameBuf);
     DF_LOGI("connectDeskflow: started=%{public}d", started ? 1 : 0);
 

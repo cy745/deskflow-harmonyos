@@ -153,13 +153,43 @@ void DeskflowClient::setStatus(const std::string& s)
 
 void DeskflowClient::run()
 {
+    // 外层循环：负责重连。run() 由 start() 起的 worker 线程执行一次，
+    // 内部在断开后按需重连，直到 stop() 被调用或收到不可重连指示。
+    while (!m_stopRequested.load()) {
+        m_shouldReconnect = true;  // 每次新连接开始时重置
+
+        // 执行一次"连接→握手→消息循环"。返回值为"断开后是否应继续重连"。
+        bool shouldContinue = runOnce();
+
+        if (!m_autoReconnect.load() || !shouldContinue || m_stopRequested.load()) {
+            break;
+        }
+
+        // 退避重连
+        setStatus("reconnecting in " + std::to_string(m_reconnectIntervalMs.load()) + "ms");
+        DF_LOGI("reconnect in %{public}d ms", m_reconnectIntervalMs.load());
+        int32_t waitMs = m_reconnectIntervalMs.load();
+        for (int32_t waited = 0; waited < waitMs && !m_stopRequested.load(); waited += 100) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+
+    m_running = false;
+    if (!m_stopRequested.load()) {
+        // 循环因不再重连而退出（如收到 CBYE/EICV）
+        setStatus("disconnected");
+    }
+}
+
+// 单次连接生命周期：连接 → 握手 → 消息循环。运行期断开返回 true（可重连），否则 false。
+bool DeskflowClient::runOnce()
+{
     setStatus("connecting to " + m_host + ":" + std::to_string(m_port));
     DF_LOGI("connecting to %{public}s:%{public}d", m_host.c_str(), m_port);
     if (!m_stream.connect(m_host, m_port, 5000)) {
         DF_LOGE("connect failed");
         setStatus("error: connect failed");
-        m_running = false;
-        return;
+        return true;  // 可重连（例如服务端暂不可达）
     }
     DF_LOGI("tcp connected");
     setStatus("connected, handshake...");
@@ -167,8 +197,8 @@ void DeskflowClient::run()
         DF_LOGE("handshake failed");
         setStatus("error: handshake failed");
         m_stream.close();
-        m_running = false;
-        return;
+        // 版本不兼容时 handshake() 会把 m_shouldReconnect 置 false
+        return m_shouldReconnect.load();
     }
     DF_LOGI("handshake ok");
     setStatus("handshake ok, waiting for enter (move mouse to this screen)");
@@ -216,10 +246,8 @@ void DeskflowClient::run()
     DF_LOGI("message loop exited (stopRequested=%{public}d)", m_stopRequested.load() ? 1 : 0);
 
     m_stream.close();
-    m_running = false;
-    if (!m_stopRequested.load()) {
-        setStatus("disconnected");
-    }
+    // 断开后是否重连：未被 stop，且未被置为不重连（CBYE/EICV）
+    return !m_stopRequested.load() && m_shouldReconnect.load();
 }
 
 bool DeskflowClient::handshake()
@@ -246,6 +274,8 @@ bool DeskflowClient::handshake()
         oss << "protocol mismatch: name='" << protocolName << "' ver=" << major << "." << minor;
         DF_LOGE("protocol mismatch: name='%{public}s' ver=%{public}d.%{public}d",
             protocolName.c_str(), major, minor);
+        // 协议名/主版本对不上：重连也无效，放弃
+        m_shouldReconnect = false;
         setStatus(oss.str());
         return false;
     }
@@ -314,6 +344,8 @@ bool DeskflowClient::handleMessage(const std::string& key)
         return true;
     }
     if (key == kMsgCClose) {
+        // 服务端主动说再见（CBYE）：不重连
+        m_shouldReconnect = false;
         setStatus("closed by server");
         return false;
     }
@@ -506,6 +538,8 @@ bool DeskflowClient::handleMessage(const std::string& key)
         if (!ProtoUtil::readf(m_stream, kMsgEIncompatible + 4, &a, &b)) {
             return false;
         }
+        // 版本不兼容：重连也无效，放弃
+        m_shouldReconnect = false;
         setStatus("error: incompatible version, server wants " + std::to_string(a) + "." + std::to_string(b));
         return false;
     }
