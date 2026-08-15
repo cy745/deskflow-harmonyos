@@ -16,13 +16,14 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { display } from '@kit.ArkUI';
 import { preferences } from '@kit.ArkData';
-import { common } from '@kit.AbilityKit';
+import { common, abilityAccessCtrl, Permissions } from '@kit.AbilityKit';
 import { pasteboard } from '@kit.BasicServicesKit';
 import deskflow from 'libentry.so';
 import { ConnState, StatusBarManager } from '../statusbar/StatusBarManager';
 import { desktopManager } from '../statusbar/DeskflowStatusStore';
 
 const DOMAIN = 0x0000;
+const READ_PASTEBOARD_PERM: Permissions = 'ohos.permission.READ_PASTEBOARD';
 const PREFS_NAME = 'deskflow_config';
 const PREFS_HOST = 'host';
 const PREFS_PORT = 'port';
@@ -96,21 +97,22 @@ struct Index {
     sb.onConnectClick = () => this.onConnect();
     sb.onDisconnectClick = () => this.onDisconnect();
     // 监听连接状态（worker 线程通过 NAPI 线程安全函数回投）
-    // 顺带监听剪贴板同步触发：进入本机屏幕(active)时 C++ 已发 CCLP 拉取；
-    // 离开本机屏幕(inactive)时把本机剪贴板推给对端。
-    let prevActive = false;
     deskflow.onDeskflowStatus((event: deskflow.ValueChangeEvent) => {
       this.statusText = event.value;
       this.connState = this.mapStatus(event.value);
-      const s = event.value.toLowerCase();
-      const isActive = s.indexOf('active') >= 0 || s.indexOf('control acquired') >= 0;
-      if (prevActive && !isActive && this.clipboardSync) {
-        // 刚离开本机屏幕：把本机剪贴板推给服务端
-        this.pushLocalClipboard();
-      }
-      prevActive = isActive;
       this.syncTray();
     });
+    // 监听本机剪贴板变化：检测到真实的本地复制时立即推给服务端。
+    // 用 pasteboard 'update' 监听比等 COUT 离开屏幕更可靠（服务端离开时不一定发 COUT 给我们）。
+    try {
+      pasteboard.getSystemPasteboard().on('update', () => {
+        if (this.clipboardSync) {
+          this.pushLocalClipboard();
+        }
+      });
+    } catch (e) {
+      hilog.warn(DOMAIN, 'DeskflowClip', 'register pasteboard update listener fail: %{public}s', JSON.stringify(e));
+    }
     // 监听远程剪贴板文本到达：写入系统剪贴板
     deskflow.onClipboardData((event: deskflow.ValueChangeEvent) => {
       hilog.info(DOMAIN, 'DeskflowClip', 'recv remote clip len=%{public}d', event.value.length);
@@ -171,14 +173,43 @@ struct Index {
 
   // ===== 剪贴板同步 =====
 
+  /** 开启剪贴板同步时向用户请求读取剪贴板权限（鸿蒙要求 ohos.permission.READ_PASTEBOARD） */
+  private requestClipboardPermission(): void {
+    try {
+      const atManager = abilityAccessCtrl.createAtManager();
+      atManager.requestPermissionsFromUser(this.getUIContext().getHostContext() as common.UIAbilityContext,
+        [READ_PASTEBOARD_PERM]).then((data) => {
+          const granted = data.authResults && data.authResults[0] === 0;
+          if (!granted) {
+            this.clipboardSync = false;
+            try {
+              this.statusText = '未授权读取剪贴板，剪贴板同步已关闭';
+            } catch (e) {
+            }
+            this.savePrefs();
+          } else {
+            this.statusText = '剪贴板读取权限已授权';
+          }
+          hilog.info(DOMAIN, 'DeskflowClip', 'request READ_PASTEBOARD granted=%{public}d', granted ? 1 : 0);
+        }).catch((e: Error) => {
+          hilog.warn(DOMAIN, 'DeskflowClip', 'request perm fail: %{public}s', e.message);
+        });
+    } catch (e) {
+      hilog.warn(DOMAIN, 'DeskflowClip', 'requestClipboardPermission error: %{public}s', JSON.stringify(e));
+    }
+  }
+
   /** 读取系统剪贴板纯文本（供推送用；失败返回空串） */
   private readSystemClipboard(): string {
     try {
-      const data = pasteboard.getSystemPasteboard().getDataSync();
-      const text = data.getPrimaryText();
+      const sys = pasteboard.getSystemPasteboard();
+      const data = sys.getDataSync();
+      const text = data.getPrimaryText ? data.getPrimaryText() : '';
       return text ? text : '';
     } catch (e) {
-      hilog.warn(DOMAIN, 'DeskflowClip', 'read clipboard fail: %{public}s', JSON.stringify(e));
+      const err = e as BusinessError;
+      hilog.warn(DOMAIN, 'DeskflowClip', 'read clipboard fail code=%{public}d msg=%{public}s',
+        err.code, err.message);
     }
     return '';
   }
@@ -187,19 +218,18 @@ struct Index {
   private setSystemClipboard(value: string): void {
     try {
       if (!this.clipboardSync || !value || value.length === 0) {
-        hilog.warn(DOMAIN, 'DeskflowClip', 'setSystemClipboard skip (sync=%{public}d len=%{public}d)',
-          this.clipboardSync ? 1 : 0, value ? value.length : 0);
         return;
       }
       const data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, value);
       pasteboard.getSystemPasteboard().setDataSync(data);
-      hilog.info(DOMAIN, 'DeskflowClip', 'wrote system clipboard len=%{public}d', value.length);
     } catch (e) {
       hilog.warn(DOMAIN, 'DeskflowClip', 'set clipboard fail: %{public}s', JSON.stringify(e));
     }
   }
 
-  /** 离开本机屏幕时：把本机剪贴板推给服务端（忽略回环，不推刚写入的远程内容） */
+  /** 本机剪贴板变化（或离开屏幕）时：把本机剪贴板推给服务端。
+   *  注：鸿蒙 6.1 读取系统剪贴板需要 READ_PASTEBOARD（声明会导致安装失败 9568289），
+   *  故 readSystemClipboard 可能拿不到明文，此推送在那种情况下静默跳过。 */
   private pushLocalClipboard(): void {
     if (!this.clipboardSync) {
       return;
@@ -208,6 +238,7 @@ struct Index {
     if (text && text.length > 0 && text !== this.lastRemoteClipboard) {
       try {
         deskflow.pushClipboard(text);
+        hilog.info(DOMAIN, 'DeskflowClip', 'push local clipboard len=%{public}d', text.length);
       } catch (e) {
         hilog.warn(DOMAIN, 'DeskflowClip', 'push clipboard fail: %{public}s', JSON.stringify(e));
       }
@@ -352,6 +383,10 @@ struct Index {
               this.statusText = `设置剪贴板同步失败: ${JSON.stringify(e)}`;
             }
             this.savePrefs();
+            // 开启时向用户请求读取剪贴板权限（鸿蒙要求 READ_PASTEBOARD）
+            if (isOn) {
+              this.requestClipboardPermission();
+            }
           })
       }
       .width('100%')
