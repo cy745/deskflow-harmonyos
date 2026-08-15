@@ -16,11 +16,14 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { display } from '@kit.ArkUI';
 import { preferences } from '@kit.ArkData';
-import { common, abilityAccessCtrl, Permissions } from '@kit.AbilityKit';
+import { common, abilityAccessCtrl, Permissions, Want, StartOptions } from '@kit.AbilityKit';
 import { pasteboard } from '@kit.BasicServicesKit';
+import { commonEventManager } from '@kit.BasicServicesKit';
+import { BusinessError } from '@kit.BasicServicesKit';
 import deskflow from 'libentry.so';
 import { ConnState, StatusBarManager } from '../statusbar/StatusBarManager';
 import { desktopManager } from '../statusbar/DeskflowStatusStore';
+import { BGEVT_STATUS, BGEVT_CLIP, BGEVT_STOP } from '../background/BackGroundAbility';
 
 const DOMAIN = 0x0000;
 const READ_PASTEBOARD_PERM: Permissions = 'ohos.permission.READ_PASTEBOARD';
@@ -96,12 +99,8 @@ struct Index {
     const sb = StatusBarManager.getInstance();
     sb.onConnectClick = () => this.onConnect();
     sb.onDisconnectClick = () => this.onDisconnect();
-    // 监听连接状态（worker 线程通过 NAPI 线程安全函数回投）
-    deskflow.onDeskflowStatus((event: deskflow.ValueChangeEvent) => {
-      this.statusText = event.value;
-      this.connState = this.mapStatus(event.value);
-      this.syncTray();
-    });
+    // 连接由后台承载 Ability 持有；状态/剪贴板经 commonEvent 广播回本页
+    this.subscribeBgEvents();
     // 监听本机剪贴板变化：检测到真实的本地复制时立即推给服务端。
     // 用 pasteboard 'update' 监听比等 COUT 离开屏幕更可靠（服务端离开时不一定发 COUT 给我们）。
     try {
@@ -113,14 +112,36 @@ struct Index {
     } catch (e) {
       hilog.warn(DOMAIN, 'DeskflowClip', 'register pasteboard update listener fail: %{public}s', JSON.stringify(e));
     }
-    // 监听远程剪贴板文本到达：写入系统剪贴板
-    deskflow.onClipboardData((event: deskflow.ValueChangeEvent) => {
-      hilog.info(DOMAIN, 'DeskflowClip', 'recv remote clip len=%{public}d', event.value.length);
-      this.lastRemoteClipboard = event.value;
-      this.setSystemClipboard(event.value);
-    });
     // 回填上次保存的连接配置
     this.loadPrefs();
+  }
+
+  /** 订阅后台承载 Ability 广播的连接状态 / 远程剪贴板 */
+  private subscribeBgEvents(): void {
+    try {
+      const info: commonEventManager.CommonEventSubscribeInfo =
+        { events: [BGEVT_STATUS, BGEVT_CLIP] };
+      const sub = commonEventManager.createSubscriberSync(info);
+      commonEventManager.subscribe(sub, (err, data) => {
+        if (err) {
+          hilog.warn(DOMAIN, 'DeskflowBg', 'subscribe fail: %{public}s', JSON.stringify(err));
+          return;
+        }
+        if (data?.event === BGEVT_STATUS) {
+          const value = `${data.data ?? ''}`;
+          this.statusText = value;
+          this.connState = this.mapStatus(value);
+          this.syncTray();
+        } else if (data?.event === BGEVT_CLIP) {
+          const value = `${data.data ?? ''}`;
+          hilog.info(DOMAIN, 'DeskflowClip', 'recv remote clip len=%{public}d', value.length);
+          this.lastRemoteClipboard = value;
+          this.setSystemClipboard(value);
+        }
+      });
+    } catch (e) {
+      hilog.warn(DOMAIN, 'DeskflowBg', 'subscribeBgEvents error: %{public}s', JSON.stringify(e));
+    }
   }
 
   /** 读取上次保存的连接配置（host/port/name/滚轮反转/自动重连） */
@@ -248,8 +269,17 @@ struct Index {
     const text = this.readSystemClipboard();
     if (text && text.length > 0 && text !== this.lastRemoteClipboard) {
       try {
-        deskflow.pushClipboard(text);
-        hilog.info(DOMAIN, 'DeskflowClip', 'push local clipboard len=%{public}d', text.length);
+        // 上传方向把文本交给后台承载 Ability 推送（连接在它进程里）
+        const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+        const want: Want = {
+          bundleName: 'com.deskflow.ohospoc',
+          abilityName: 'BackGroundAbility',
+          parameters: { 'clipPush': text }
+        };
+        context.startAbility(want).catch((e: BusinessError) => {
+          hilog.warn(DOMAIN, 'DeskflowClip', 'push via BG fail: %{public}s', JSON.stringify(e));
+        });
+        hilog.info(DOMAIN, 'DeskflowClip', 'push local clipboard len=%{public}d (via BG)', text.length);
       } catch (e) {
         hilog.warn(DOMAIN, 'DeskflowClip', 'push clipboard fail: %{public}s', JSON.stringify(e));
       }
@@ -421,15 +451,23 @@ struct Index {
         this.statusText = '请先填写服务端 IP/地址';
         return;
       }
-      const d = display.getDefaultDisplaySync();
-      const w = Math.round(d.width);
-      const h = Math.round(d.height);
-      // 同步滚轮开关与自动重连开关、剪贴板同步开关
-      deskflow.setInvertScroll(this.invertScroll);
-      deskflow.setAutoReconnect(this.autoReconnect);
-      deskflow.setClipboardSync(this.clipboardSync);
-      this.statusText = deskflow.connectDeskflow(this.hostInput, Number(this.portInput), this.screenName, w, h);
+      // 连接由后台承载 Ability（状态栏项钉定进程）建立，隐藏到托盘时不被冻结。
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const want: Want = {
+        bundleName: 'com.deskflow.ohospoc',
+        abilityName: 'BackGroundAbility',
+        parameters: {
+          'host': this.hostInput.trim(),
+          'port': Number(this.portInput),
+          'screen': this.screenName,
+          'invert': this.invertScroll,
+          'autoreconnect': this.autoReconnect,
+          'clipboard': this.clipboardSync
+        }
+      };
+      this.startBg(want);
       this.connState = ConnState.CONNECTING;
+      this.statusText = `正在连接 ${this.hostInput.trim()}:${this.portInput}...`;
       this.savePrefs();
     } catch (e) {
       this.statusText = `连接失败: ${JSON.stringify(e)}`;
@@ -440,14 +478,37 @@ struct Index {
 
   onDisconnect(): void {
     try {
-      // 手动断开视为用户主动停止，关闭自动重连避免立刻重连
-      deskflow.setAutoReconnect(false);
-      this.statusText = deskflow.disconnectDeskflow();
+      // 通过 commonEvent 通知后台承载 Ability 断开并自行终止
+      const opts: commonEventManager.CommonEventPublishData = { data: 'stop' };
+      commonEventManager.publish(BGEVT_STOP, opts, (err) => {
+        if (err) {
+          hilog.warn(DOMAIN, 'DeskflowBg', 'stop publish fail: %{public}s', JSON.stringify(err));
+        }
+      });
+      this.statusText = '正在断开连接...';
       this.connState = ConnState.DISCONNECTED;
+      this.syncTray();
     } catch (e) {
       this.statusText = `断开失败: ${JSON.stringify(e)}`;
+      this.connState = ConnState.ERROR;
+      this.syncTray();
     }
-    this.syncTray();
+  }
+
+  /** 以独立进程方式启动后台承载 Ability（隐藏启动，独立于主窗口进程，避免隐藏时被冻结）。 */
+  private startBg(want: Want): void {
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    try {
+      const options: StartOptions = {
+        processMode: 1, // contextConstant.ProcessMode.NEW_PROCESS_ATTACH_TO_PARENT
+        startupVisibility: 0 // contextConstant.StartupVisibility.STARTUP_HIDE
+      };
+      context.startAbility(want, options).catch((e: BusinessError) => {
+        hilog.warn(DOMAIN, 'DeskflowBg', 'startAbility fail: %{public}s', JSON.stringify(e));
+      });
+    } catch (e) {
+      hilog.warn(DOMAIN, 'DeskflowBg', 'startAbility error: %{public}s', JSON.stringify(e));
+    }
   }
 
   build() {
