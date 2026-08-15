@@ -39,6 +39,22 @@ grep -rn --include='*.json5' -E '\.(p12|p7b|cer)|storePassword|keyPassword|\.oho
 
 确保输出为空再 `git add -A`。
 
+### 强烈推荐：把本地签名段排除出 git 跟踪
+
+DevEco 每次生成签名会把 `signingConfigs`（含 `.p12` 绝对路径与口令哈希）写回本机的
+`build-profile.json5`。为了避免本地写回的签名段被误提交，建议对本机这份文件启用
+**skip-worktree**（git 将忽略其本地改动，远程保持无签名版本，本地保留签名版本）：
+
+```bash
+git update-index --skip-worktree build-profile.json5
+```
+
+之后 `git status` 将不再显示 `build-profile.json5` 的本地改动。本仓库的维护者正是用
+此方式保护本地签名，同时远程 `build-profile.json5` 始终是无签名的可分发模板。
+
+> 如需临时查看本地签名版与仓库版的差异：`git diff HEAD build-profile.json5`（受
+> skip-worktree 影响需配合 `git update-index --no-skip-worktree` 临时恢复）。
+
 ## CI / 无头构建（可选）
 
 如需在 CI 无交互签名构建，把签名材料经 CI Secret 注入，并在构建前生成
