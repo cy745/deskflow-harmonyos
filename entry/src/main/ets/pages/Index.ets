@@ -17,6 +17,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { display } from '@kit.ArkUI';
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
+import { pasteboard } from '@kit.BasicServicesKit';
 import deskflow from 'libentry.so';
 import { ConnState, StatusBarManager } from '../statusbar/StatusBarManager';
 import { desktopManager } from '../statusbar/DeskflowStatusStore';
@@ -28,6 +29,7 @@ const PREFS_PORT = 'port';
 const PREFS_NAME_FIELD = 'client_name';
 const PREFS_INVERT = 'invert_scroll';
 const PREFS_AUTORECONNECT = 'auto_reconnect';
+const PREFS_CLIPBOARD = 'clipboard_sync';
 
 function stateColor(state: number): string {
   switch (state) {
@@ -57,6 +59,9 @@ struct Index {
   @State screenName: string = 'HarmonyPC';
   @State invertScroll: boolean = false;
   @State autoReconnect: boolean = true; // 默认开启自动重连/启动自动连接
+  @State clipboardSync: boolean = false; // 默认关闭剪贴板同步（涉及系统剪贴板权限）
+  // 剪贴板桥接：避免把刚写入的本机内容又当成本机新复制推回去（回环）
+  private lastRemoteClipboard: string = '';
 
   // 根据服务端状态字符串推断连接状态
   private mapStatus(s: string): number {
@@ -91,10 +96,25 @@ struct Index {
     sb.onConnectClick = () => this.onConnect();
     sb.onDisconnectClick = () => this.onDisconnect();
     // 监听连接状态（worker 线程通过 NAPI 线程安全函数回投）
+    // 顺带监听剪贴板同步触发：进入本机屏幕(active)时 C++ 已发 CCLP 拉取；
+    // 离开本机屏幕(inactive)时把本机剪贴板推给对端。
+    let prevActive = false;
     deskflow.onDeskflowStatus((event: deskflow.ValueChangeEvent) => {
       this.statusText = event.value;
       this.connState = this.mapStatus(event.value);
+      const s = event.value.toLowerCase();
+      const isActive = s.indexOf('active') >= 0 || s.indexOf('control acquired') >= 0;
+      if (prevActive && !isActive && this.clipboardSync) {
+        // 刚离开本机屏幕：把本机剪贴板推给服务端
+        this.pushLocalClipboard();
+      }
+      prevActive = isActive;
       this.syncTray();
+    });
+    // 监听远程剪贴板文本到达：写入系统剪贴板
+    deskflow.onClipboardData((event: deskflow.ValueChangeEvent) => {
+      this.lastRemoteClipboard = event.value;
+      this.setSystemClipboard(event.value);
     });
     // 回填上次保存的连接配置
     this.loadPrefs();
@@ -110,6 +130,7 @@ struct Index {
         this.screenName = pref.getSync(PREFS_NAME_FIELD, 'HarmonyPC') as string;
         this.invertScroll = pref.getSync(PREFS_INVERT, false) as boolean;
         this.autoReconnect = pref.getSync(PREFS_AUTORECONNECT, true) as boolean;
+        this.clipboardSync = pref.getSync(PREFS_CLIPBOARD, false) as boolean;
         // 启动自动连接：回填完配置后，若开启且地址可用，自动发起连接
         if (this.autoReconnect && this.hostInput.trim().length > 0 && this.connState === ConnState.DISCONNECTED) {
           hilog.info(DOMAIN, 'DeskflowPrefs', 'auto reconnect on launch, connecting...');
@@ -133,6 +154,7 @@ struct Index {
         pref.putSync(PREFS_NAME_FIELD, this.screenName);
         pref.putSync(PREFS_INVERT, this.invertScroll);
         pref.putSync(PREFS_AUTORECONNECT, this.autoReconnect);
+        pref.putSync(PREFS_CLIPBOARD, this.clipboardSync);
         pref.flush();
       });
     } catch (err) {
@@ -144,6 +166,48 @@ struct Index {
     // 更新托盘图标/菜单 + 共享状态（供工具栏快速操作弹窗显示）
     desktopManager.setState(this.connState, this.statusText);
     StatusBarManager.getInstance().updateState(this.connState);
+  }
+
+  // ===== 剪贴板同步 =====
+
+  /** 读取系统剪贴板纯文本（供推送用；失败返回空串） */
+  private readSystemClipboard(): string {
+    try {
+      const data = pasteboard.getSystemPasteboard().getDataSync();
+      const text = data.getPrimaryText();
+      return text ? text : '';
+    } catch (e) {
+      hilog.warn(DOMAIN, 'DeskflowClip', 'read clipboard fail: %{public}s', JSON.stringify(e));
+    }
+    return '';
+  }
+
+  /** 写入系统剪贴板（远程剪贴板文本到达时调用） */
+  private setSystemClipboard(value: string): void {
+    try {
+      if (!this.clipboardSync || !value || value.length === 0) {
+        return;
+      }
+      const data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, value);
+      pasteboard.getSystemPasteboard().setDataSync(data);
+    } catch (e) {
+      hilog.warn(DOMAIN, 'DeskflowClip', 'set clipboard fail: %{public}s', JSON.stringify(e));
+    }
+  }
+
+  /** 离开本机屏幕时：把本机剪贴板推给服务端（忽略回环，不推刚写入的远程内容） */
+  private pushLocalClipboard(): void {
+    if (!this.clipboardSync) {
+      return;
+    }
+    const text = this.readSystemClipboard();
+    if (text && text.length > 0 && text !== this.lastRemoteClipboard) {
+      try {
+        deskflow.pushClipboard(text);
+      } catch (e) {
+        hilog.warn(DOMAIN, 'DeskflowClip', 'push clipboard fail: %{public}s', JSON.stringify(e));
+      }
+    }
   }
 
   @Builder
@@ -269,6 +333,30 @@ struct Index {
         .fontColor('#999999')
         .width('100%')
         .margin({ top: 4 })
+
+      Row() {
+        Text('剪贴板同步')
+          .fontSize(14)
+        Blank()
+        Toggle({ type: ToggleType.Switch, isOn: this.clipboardSync })
+          .selectedColor('#4CB050')
+          .onChange((isOn: boolean) => {
+            this.clipboardSync = isOn;
+            try {
+              this.statusText = deskflow.setClipboardSync(isOn);
+            } catch (e) {
+              this.statusText = `设置剪贴板同步失败: ${JSON.stringify(e)}`;
+            }
+            this.savePrefs();
+          })
+      }
+      .width('100%')
+      .margin({ top: 12 })
+      Text('本机与服务端之间同步剪贴板文本（进入/离开本机屏幕时同步）。')
+        .fontSize(12)
+        .fontColor('#999999')
+        .width('100%')
+        .margin({ top: 4 })
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
@@ -286,9 +374,10 @@ struct Index {
       const d = display.getDefaultDisplaySync();
       const w = Math.round(d.width);
       const h = Math.round(d.height);
-      // 同步滚轮开关与自动重连开关
+      // 同步滚轮开关与自动重连开关、剪贴板同步开关
       deskflow.setInvertScroll(this.invertScroll);
       deskflow.setAutoReconnect(this.autoReconnect);
+      deskflow.setClipboardSync(this.clipboardSync);
       this.statusText = deskflow.connectDeskflow(this.hostInput, Number(this.portInput), this.screenName, w, h);
       this.connState = ConnState.CONNECTING;
       this.savePrefs();

@@ -164,6 +164,56 @@ void DeskflowClient::setStatus(const std::string& s)
     }
 }
 
+// 发送 DCLP 帧给对端（barrier: DCLP%1i%4i%1i%s, id=1, seq, mark, text）
+bool DeskflowClient::sendClipboard(const std::string& text)
+{
+    if (!m_handshakeDone || text.empty()) {
+        return false;
+    }
+    uint32_t seq = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_clipboardMutex);
+        seq = ++m_clipboardSeq;
+        m_lastClipboardText = text;
+    }
+    std::vector<uint8_t> out;
+    uint8_t id = 1;
+    uint8_t mark = 1;
+    ProtoUtil::writef(out, kMsgDClipboard, id, seq, mark, &text);   // 含 "DCLP" 键 + 载荷
+    bool ok = m_stream.writeFrame(out.data(), out.size());
+    DF_LOGI("DCLP push id=%{public}u seq=%{public}u bytes=%{public}zu ok=%{public}d",
+        id, seq, out.size(), ok ? 1 : 0);
+    return ok;
+}
+
+// 把本机剪贴板文本推送/广播给对端（ArkTS 调用；可能来自 worker 或 JS 线程）
+void DeskflowClient::pushClipboard(const std::string& text)
+{
+    if (!m_clipboardSync.load() || !m_handshakeDone || text.empty()) {
+        return;
+    }
+    sendClipboard(text);
+}
+
+// 向服务端请求当前剪贴板内容（服务端以 DCLP 回填）。worker 线程调用。
+void DeskflowClient::requestClipboard()
+{
+    if (!m_clipboardSync.load() || !m_handshakeDone) {
+        return;
+    }
+    // barrier：客户端进入屏幕时发 CCLP 请求抓取剪贴板（CCLP%1i%4i, id, seq）
+    uint32_t seq = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_clipboardMutex);
+        seq = ++m_clipboardSeq;
+    }
+    std::vector<uint8_t> out;
+    uint8_t id = 1;
+    ProtoUtil::writef(out, kMsgCClipboard, id, seq);   // 含 "CCLP" 键 + 载荷
+    bool ok = m_stream.writeFrame(out.data(), out.size());
+    DF_LOGI("CCLP request id=%{public}u seq=%{public}u ok=%{public}d", id, seq, ok ? 1 : 0);
+}
+
 void DeskflowClient::run()
 {
     // 外层循环：负责重连。run() 由 start() 起的 worker 线程执行一次，
@@ -341,6 +391,10 @@ bool DeskflowClient::handleMessage(const std::string& key)
             injectMouseMove(x, y);
         }
         syncModifiers(static_cast<uint32_t>(mask));
+        // 进入本机屏幕：开启剪贴板同步则向服务端请求剪贴板内容（服务端以 DCLP 回填）
+        if (m_clipboardSync.load()) {
+            requestClipboard();
+        }
         setStatus("active: control acquired, pointer at " + std::to_string(x) + "," + std::to_string(y));
         return true;
     }
@@ -510,6 +564,22 @@ bool DeskflowClient::handleMessage(const std::string& key)
         std::string data;
         if (!ProtoUtil::readf(m_stream, kMsgDClipboard + 4, &id, &seq, &mark, &data)) {
             return false;
+        }
+        // 远程剪贴板内容到达：交给 JS 写入系统剪贴板
+        if (m_clipboardSync.load() && !data.empty()) {
+            ClipboardCallback cb = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(m_clipboardMutex);
+                cb = m_clipboardCb;
+                m_lastClipboardText = data;   // 记录，用于忽略后续本机同源回环
+            }
+            if (cb) {
+                cb(data);
+            }
+            DF_LOGI("DCLP: remote clipboard %{public}zu bytes -> JS", data.size());
+        } else {
+            DF_LOGD("DCLP: ignore (sync=%{public}d size=%{public}zu)",
+                m_clipboardSync.load() ? 1 : 0, data.size());
         }
         return true;
     }

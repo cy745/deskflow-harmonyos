@@ -11,6 +11,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -33,12 +34,20 @@ class DeskflowClient
 {
 public:
     using StatusCallback = std::function<void(const std::string&)>;
+    using ClipboardCallback = std::function<void(const std::string&)>;
 
     DeskflowClient();
     ~DeskflowClient();
 
     // Set callback invoked from worker thread with status strings
     void setStatusCallback(StatusCallback cb) { m_statusCb = cb; }
+
+    // Set callback invoked when remote clipboard text arrives (worker thread)
+    void setClipboardCallback(ClipboardCallback cb) { m_clipboardCb = cb; }
+
+    // Enable/disable clipboard sync (thread-safe; read by protocol thread)
+    void setClipboardSync(bool enable) { m_clipboardSync = enable; }
+    bool clipboardSync() const { return m_clipboardSync.load(); }
 
     // Start connection in a background thread. Returns false if already running.
     bool start(const std::string& host, uint16_t port, const std::string& screenName);
@@ -64,6 +73,12 @@ public:
         m_autoReconnect = enable;
         m_reconnectIntervalMs = intervalMs;
     }
+
+    // 把本地剪贴板文本推送到对端（若当前处于运行期 & 允许剪贴板同步）。ArkTS 调用。
+    void pushClipboard(const std::string& text);
+
+    // 主动向对端请求剪贴板内容（进入本机屏幕时调用，服务端以 DCLP 回填）。
+    void requestClipboard();
 
 private:
     void run();                              // worker thread: (re)connect loop
@@ -106,6 +121,18 @@ private:
     bool m_active = false;
     bool m_handshakeDone = false;   // 收到 DSOP 后进入运行期（此后每条消息回 CNOP）
     uint32_t m_seqNum = 0;          // 最近 CINN 的会话序号（剪贴板用）
+    // 剪贴板同步开关（ArkTS 开关控制）
+    std::atomic<bool> m_clipboardSync{false};
+    // 远程剪贴板文本回调（worker → JS，经 NAPI tsfn 投递）——用下面的 mutex 保护
+    ClipboardCallback m_clipboardCb;
+    // 剪贴板内容 id / seq（barrier 用区分与失效判定）
+    uint32_t m_clipboardSeq = 1;
+    // 上一份推送/接收到的剪贴板文本（用于忽略本机回环）
+    std::string m_lastClipboardText;
+    // 保护 m_clipboardCb / m_clipboardSeq / m_lastClipboardText
+    std::mutex m_clipboardMutex;
+    // 发送 DCLP 给对端（id, seq, mark, text）
+    bool sendClipboard(const std::string& text);
     // 按键状态：keysym -> 是否按下（用于修饰键同步与按键去重）
     std::map<uint32_t, bool> m_keyStates;
     // 鼠标按钮按下状态：protocol ButtonID -> 是否按下

@@ -34,6 +34,7 @@ static constexpr const char* DF_LOG_TAG = "DeskflowPoC";
 
 static dfpoc::DeskflowClient g_deskflowClient;
 static napi_threadsafe_function g_statusTsfn = nullptr;
+static napi_threadsafe_function g_clipboardTsfn = nullptr;
 
 // 保护 g_statusTsfn / g_tsfn 跨线程访问的互斥锁
 // （worker 线程/MMI 回调线程 与 JS 线程并发）
@@ -94,6 +95,100 @@ static napi_value OnDeskflowStatus(napi_env env, napi_callback_info info)
     return nullptr;
 }
 
+// ===== 剪贴板同步桥接 =====
+// worker 线程收到对端 DCLP 剪贴板文本时，投递到 JS（供 ArkTS 写入系统剪贴板）。
+void ClipboardDataCallJs(napi_env env, napi_value js_cb, void* context, void* data)
+{
+    std::string* value = static_cast<std::string*>(data);
+    napi_value event;
+    napi_create_object(env, &event);
+    napi_value value_js;
+    napi_create_string_utf8(env, value->c_str(), value->length(), &value_js);
+    napi_set_named_property(env, event, "value", value_js);
+    napi_value global;
+    napi_get_global(env, &global);
+    napi_value ret;
+    napi_call_function(env, global, js_cb, 1, &event, &ret);
+    delete value;
+}
+
+// 注册 onClipboardData 回调：收到远程剪贴板文本时在 JS 线程触发
+static napi_value OnClipboardData(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    std::lock_guard<std::mutex> lock(g_tsfnMutex);
+    if (g_clipboardTsfn != nullptr) {
+        napi_release_threadsafe_function(g_clipboardTsfn, napi_tsfn_release);
+        g_clipboardTsfn = nullptr;
+    }
+    napi_value resourceName = nullptr;
+    std::string resName = "deskflow.clipboard";
+    napi_create_string_utf8(env, resName.c_str(), resName.size(), &resourceName);
+    napi_create_threadsafe_function(env, args[0], nullptr, resourceName, 0, 1, nullptr, nullptr, nullptr,
+        ClipboardDataCallJs, &g_clipboardTsfn);
+    return nullptr;
+}
+
+// 服务端剪贴板文本到达（worker 线程）——转发到 JS
+static void PublishClipboard(const std::string& text)
+{
+    napi_threadsafe_function tsfn = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_tsfnMutex);
+        tsfn = g_clipboardTsfn;
+    }
+    if (tsfn == nullptr) {
+        return;
+    }
+    napi_call_threadsafe_function(tsfn, new std::string(text), napi_tsfn_nonblocking);
+}
+
+// setClipboardCallback + pushClipboard 在建立连接时由 NAPI 绑定：
+// 我们用 DeskflowClipboardCb 绑定到 client 的 clipboardCallback。
+static void DeskflowClipboardCb(const std::string& text)
+{
+    if (text.empty()) {
+        return;
+    }
+    PublishClipboard(text);
+}
+
+// pushClipboard(text): 把本机剪贴板文本推送到对端（ArkTS 调用）
+static napi_value PushClipboard(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    char buf[1024 * 1024] = {0};
+    size_t len = 0;
+    napi_status st = napi_get_value_string_utf8(env, args[0], buf, sizeof(buf), &len);
+    if (st != napi_ok) {
+        DF_LOGE("PushClipboard: read string fail %{public}d", (int)st);
+    }
+    std::string text(buf, len);
+    g_deskflowClient.pushClipboard(text);
+    napi_value result;
+    napi_create_string_utf8(env, "ok", 2, &result);
+    return result;
+}
+
+// setClipboardSync(enable): 开启/关闭剪贴板同步
+static napi_value SetClipboardSync(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    bool enable = false;
+    napi_get_value_bool(env, args[0], &enable);
+    g_deskflowClient.setClipboardSync(enable);
+    napi_value result;
+    napi_create_string_utf8(env, enable ? "clipboard sync ON" : "clipboard sync OFF",
+        enable ? 17 : 18, &result);
+    return result;
+}
+
 // connectDeskflow(host, port, name, screenW, screenH): 后台线程连接 Deskflow server
 static napi_value ConnectDeskflow(napi_env env, napi_callback_info info)
 {
@@ -130,6 +225,7 @@ static napi_value ConnectDeskflow(napi_env env, napi_callback_info info)
         return result;
     }
     g_deskflowClient.setStatusCallback(DeskflowStatusCb);
+    g_deskflowClient.setClipboardCallback(DeskflowClipboardCb);
     g_deskflowClient.setScreenSize(screenW, screenH);
     // 是否自动重连由桌面侧通过 setAutoReconnect 控制（默认开启，这里不覆盖）
     bool started = g_deskflowClient.start(hostBuf, static_cast<uint16_t>(port), nameBuf);
@@ -722,6 +818,9 @@ static napi_value Init(napi_env env, napi_value exports)
         { "injectMouseTrail", nullptr, InjectMouseTrail, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "injectKey", nullptr, InjectKey, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "onDeskflowStatus", nullptr, OnDeskflowStatus, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "onClipboardData", nullptr, OnClipboardData, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "pushClipboard", nullptr, PushClipboard, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "setClipboardSync", nullptr, SetClipboardSync, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "connectDeskflow", nullptr, ConnectDeskflow, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "disconnectDeskflow", nullptr, DisconnectDeskflow, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "setInvertScroll", nullptr, SetInvertScroll, nullptr, nullptr, nullptr, napi_default, nullptr },
