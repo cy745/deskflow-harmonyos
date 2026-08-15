@@ -77,7 +77,11 @@ public:
     // 把本地剪贴板文本推送到对端（若当前处于运行期 & 允许剪贴板同步）。ArkTS 调用。
     void pushClipboard(const std::string& text);
 
-    // 主动向对端请求剪贴板内容（进入本机屏幕时调用，服务端以 DCLP 回填）。
+    // 主动向对端声明剪贴板所有权（CCLP，上传方向用）。进入屏幕时勿调用——
+    // 服务端在 CINN 后自动下推 DCLP；CCLP 会让服务端清空本端 dirty 从而抑制下推。
+    bool grabClipboard();
+
+    // 保留：接收方向无需主动请求（服务端自动下推 DCLP），此方法为 no-op。
     void requestClipboard();
 
 private:
@@ -133,6 +137,20 @@ private:
     std::mutex m_clipboardMutex;
     // 发送 DCLP 给对端（id, seq, mark, text）
     bool sendClipboard(const std::string& text);
+
+    // ---- 接收侧剪贴板分块组装状态（DCLP: mark=1 size/2 data/3 end）----
+    struct ClipChunkState {
+        bool active = false;          // 分块传输进行中
+        std::string buffer;           // 已收到的数据拼装缓冲
+        size_t expectedSize = 0;      // 声明大小
+        uint32_t clipSeq = 0;         // 本次分块的 seq
+    };
+    ClipChunkState m_clipChunk;       // 跨消息保留状态（仅 worker 线程访问，无需锁）
+
+    // 剪贴板容器（marshalled）与纯文本互转（IClipboard marshall/unmarshall 格式）
+    // marshall: 4B 格式数 + 每个格式 [4B formID + 4B size + data]（大端）
+    static std::string marshalText(const std::string& utf8Text);
+    static std::string unmarshalText(const std::string& container);  // 返回 format 0(Text) 的负载
     // 按键状态：keysym -> 是否按下（用于修饰键同步与按键去重）
     std::map<uint32_t, bool> m_keyStates;
     // 鼠标按钮按下状态：protocol ButtonID -> 是否按下

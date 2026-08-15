@@ -11,6 +11,8 @@
 #include <cstdarg>
 #include <cstring>
 #include <sstream>
+#include <utility>
+#include <algorithm>
 
 #include "hilog/log.h"
 #include "multimodalinput/oh_input_manager.h"
@@ -164,54 +166,139 @@ void DeskflowClient::setStatus(const std::string& s)
     }
 }
 
-// 发送 DCLP 帧给对端（barrier: DCLP%1i%4i%1i%s, id=1, seq, mark, text）
+// 把纯文本封装为 IClipboard marshalled 容器（供 DCLP 上传）：
+// 4B 格式数(=1) + 4B 格式(Text=0) + 4B 长度 + 文本，全部大端。
+std::string DeskflowClient::marshalText(const std::string& utf8Text)
+{
+    std::string out;
+    auto be32 = [&out](uint32_t v) {
+        out.push_back(static_cast<char>((v >> 24) & 0xff));
+        out.push_back(static_cast<char>((v >> 16) & 0xff));
+        out.push_back(static_cast<char>((v >> 8) & 0xff));
+        out.push_back(static_cast<char>(v & 0xff));
+    };
+    be32(1);            // numFormats
+    be32(0);            // Format::Text
+    be32(static_cast<uint32_t>(utf8Text.size()));
+    out += utf8Text;
+    return out;
+}
+
+// 从 IClipboard marshalled 容器中提取 format 0 (Text) 的负载；无则返回空串。
+std::string DeskflowClient::unmarshalText(const std::string& container)
+{
+    if (container.size() < 4) {
+        return "";
+    }
+    auto rd = [&container](size_t off) -> uint32_t {
+        if (off + 4 > container.size()) {
+            return 0;
+        }
+        const auto* p = reinterpret_cast<const unsigned char*>(container.data() + off);
+        return (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) |
+               (static_cast<uint32_t>(p[2]) << 8) | static_cast<uint32_t>(p[3]);
+    };
+    size_t off = 0;
+    uint32_t numFormats = rd(off);
+    off += 4;
+    for (uint32_t i = 0; i < numFormats && off + 8 <= container.size(); ++i) {
+        uint32_t format = rd(off);
+        off += 4;
+        uint32_t size = rd(off);
+        off += 4;
+        if (off + size > container.size()) {
+            break;
+        }
+        if (format == 0) {   // Format::Text
+            return container.substr(off, size);
+        }
+        off += size;
+    }
+    return "";
+}
+
+// 以分块方式发送 DCLP 给对端（barrier/deskflow: mark=1 Start(ASCII 大小) -> 2 Data -> 3 End）。
+// seq 使用当前 CINN 活跃会话序号（与官方客户端一致）。
 bool DeskflowClient::sendClipboard(const std::string& text)
 {
     if (!m_handshakeDone || text.empty()) {
         return false;
     }
-    uint32_t seq = 0;
+    // 先封装为 marshalled 容器（格式 0 文本），再分块上传
+    std::string payload = marshalText(text);   // 4B numFormats + 4B format + 4B size + text
+    constexpr uint8_t kDataStart = 1;
+    constexpr uint8_t kDataChunk = 2;
+    constexpr uint8_t kDataEnd = 3;
+    uint8_t id = 0;            // kClipboardClipboard（主剪贴板）
+    uint32_t seq = m_seqNum;   // 用活跃 CINN 的会话序号，勿手动递增
     {
         std::lock_guard<std::mutex> lock(m_clipboardMutex);
-        seq = ++m_clipboardSeq;
         m_lastClipboardText = text;
     }
+    const size_t kChunk = 512 * 1024;  // 与服务端 StreamChunker 一致（512KB）
+    bool ok = true;
+    // 1) Start：payload = 期望总大小（ASCI十进制）
+    {
+        std::vector<uint8_t> start;
+        std::string sizeStr = std::to_string(payload.size());
+        ProtoUtil::writef(start, kMsgDClipboard, id, seq, kDataStart, &sizeStr);
+        ok = ok && m_stream.writeFrame(start.data(), start.size());
+    }
+    // 2) DataChunk（按 512KB 切块）
+    for (size_t off = 0; off < payload.size() && ok; off += kChunk) {
+        std::string chunk = payload.substr(off, std::min(kChunk, payload.size() - off));
+        std::vector<uint8_t> dc;
+        ProtoUtil::writef(dc, kMsgDClipboard, id, seq, kDataChunk, &chunk);
+        ok = ok && m_stream.writeFrame(dc.data(), dc.size());
+    }
+    // 3) End
+    {
+        std::vector<uint8_t> end;
+        std::string empty;
+        ProtoUtil::writef(end, kMsgDClipboard, id, seq, kDataEnd, &empty);
+        ok = ok && m_stream.writeFrame(end.data(), end.size());
+    }
+    DF_LOGI("DCLP push id=%{public}u seq=%{public}u text=%{public}zu container=%{public}zu ok=%{public}d",
+        id, seq, text.size(), payload.size(), ok ? 1 : 0);
+    return ok;
+}
+
+// 向对端抓取剪贴板所有权（CCLP id, seq）。仅在上传方向：本机剪贴板变化后、
+// 先把所有权声明给自己、再把 DCLP 内容广播出去。官方客户端用活跃 CINN 的 seq。
+bool DeskflowClient::grabClipboard()
+{
+    if (!m_handshakeDone) {
+        return false;
+    }
     std::vector<uint8_t> out;
-    uint8_t id = 1;
-    uint8_t mark = 1;
-    ProtoUtil::writef(out, kMsgDClipboard, id, seq, mark, &text);   // 含 "DCLP" 键 + 载荷
+    uint8_t id = 0;
+    uint32_t seq = m_seqNum;   // 活跃 CINN 的会话序号
+    ProtoUtil::writef(out, kMsgCClipboard, id, seq);
     bool ok = m_stream.writeFrame(out.data(), out.size());
-    DF_LOGI("DCLP push id=%{public}u seq=%{public}u bytes=%{public}zu ok=%{public}d",
-        id, seq, out.size(), ok ? 1 : 0);
+    DF_LOGI("CCLP grab id=%{public}u seq=%{public}u ok=%{public}d", id, seq, ok ? 1 : 0);
     return ok;
 }
 
 // 把本机剪贴板文本推送/广播给对端（ArkTS 调用；可能来自 worker 或 JS 线程）
+// 官方客户端流程：先 CCLP 声明所有权，再分块 DCLP 上传内容。
 void DeskflowClient::pushClipboard(const std::string& text)
 {
     if (!m_clipboardSync.load() || !m_handshakeDone || text.empty()) {
         return;
     }
+    grabClipboard();
     sendClipboard(text);
 }
 
-// 向服务端请求当前剪贴板内容（服务端以 DCLP 回填）。worker 线程调用。
+// 保留（不再被 CINN 调用）：进入屏幕时由服务端主动下推 DCLP，客户端无需 CCLP 抓取。
+// 若仍想主动刷新一次可用。此方法对接收方向无副作用，但注意 CCLP 会让服务端
+// 将本端 m_dirty 清 false 从而抑制下推，故默认不调用。
 void DeskflowClient::requestClipboard()
 {
-    if (!m_clipboardSync.load() || !m_handshakeDone) {
-        return;
+    // no-op：见 sendClipboard 与 CINN 处理说明（CCLP 不再用于接收方向）
+    if (m_clipboardSync.load()) {
+        DF_LOGI("requestClipboard: no-op (server auto-pushes DCLP on CINN)");
     }
-    // barrier：客户端进入屏幕时发 CCLP 请求抓取剪贴板（CCLP%1i%4i, id, seq）
-    uint32_t seq = 0;
-    {
-        std::lock_guard<std::mutex> lock(m_clipboardMutex);
-        seq = ++m_clipboardSeq;
-    }
-    std::vector<uint8_t> out;
-    uint8_t id = 1;
-    ProtoUtil::writef(out, kMsgCClipboard, id, seq);   // 含 "CCLP" 键 + 载荷
-    bool ok = m_stream.writeFrame(out.data(), out.size());
-    DF_LOGI("CCLP request id=%{public}u seq=%{public}u ok=%{public}d", id, seq, ok ? 1 : 0);
 }
 
 void DeskflowClient::run()
@@ -391,10 +478,10 @@ bool DeskflowClient::handleMessage(const std::string& key)
             injectMouseMove(x, y);
         }
         syncModifiers(static_cast<uint32_t>(mask));
-        // 进入本机屏幕：开启剪贴板同步则向服务端请求剪贴板内容（服务端以 DCLP 回填）
-        if (m_clipboardSync.load()) {
-            requestClipboard();
-        }
+        // 服务端在收到 CINN 后会自动推送 DCLP 剪贴板（分块：size→data→end）。
+        // 注意：此处绝不能发 CCLP 去"抓取"——据 deskflow Server::handleClipboardGrabbed，
+        // 收到 CCLP 会把本客户端剪贴板标记为 m_dirty=false 并清空服务端缓存，
+        // 从而抑制服务端后续的 DCLP 推送。故进入本机屏幕时静默等待 DCLP 即可。
         setStatus("active: control acquired, pointer at " + std::to_string(x) + "," + std::to_string(y));
         return true;
     }
@@ -565,22 +652,63 @@ bool DeskflowClient::handleMessage(const std::string& key)
         if (!ProtoUtil::readf(m_stream, kMsgDClipboard + 4, &id, &seq, &mark, &data)) {
             return false;
         }
-        // 远程剪贴板内容到达：交给 JS 写入系统剪贴板
-        if (m_clipboardSync.load() && !data.empty()) {
-            ClipboardCallback cb = nullptr;
-            {
-                std::lock_guard<std::mutex> lock(m_clipboardMutex);
-                cb = m_clipboardCb;
-                m_lastClipboardText = data;   // 记录，用于忽略后续本机同源回环
+        // DCLP 是按块传输：mark=1 DataStart(payload=ASCII 期望大小) →
+        // mark=2 DataChunk(payload=内容分块) → mark=3 DataEnd(完成)。见 deskflow ClipboardChunk。
+        constexpr uint8_t kDataStart = 1;
+        constexpr uint8_t kDataChunk = 2;
+        constexpr uint8_t kDataEnd = 3;
+        if (mark == kDataStart) {
+            m_clipChunk.active = true;
+            m_clipChunk.buffer.clear();
+            m_clipChunk.clipSeq = seq;
+            try {
+                m_clipChunk.expectedSize = static_cast<size_t>(std::stoull(data));
+            } catch (...) {
+                m_clipChunk.expectedSize = 0;
             }
-            if (cb) {
-                cb(data);
+            // 大小即内容长度，直接校验上限，避免越界
+            if (m_clipChunk.expectedSize > kProtocolMaxStringLength) {
+                DF_LOGE("DCLP start size too large: %{public}zu", m_clipChunk.expectedSize);
+                m_clipChunk.active = false;
+                m_clipChunk.buffer.clear();
             }
-            DF_LOGI("DCLP: remote clipboard %{public}zu bytes -> JS", data.size());
-        } else {
-            DF_LOGD("DCLP: ignore (sync=%{public}d size=%{public}zu)",
-                m_clipboardSync.load() ? 1 : 0, data.size());
+            return true;
         }
+        if (mark == kDataChunk) {
+            if (!m_clipChunk.active) {
+                DF_LOGI("DCLP data chunk before start");
+                return true;
+            }
+            m_clipChunk.buffer.append(data);
+            return true;
+        }
+        if (mark == kDataEnd) {
+            if (!m_clipChunk.active) {
+                return true;
+            }
+            m_clipChunk.active = false;
+            std::string assembled = std::move(m_clipChunk.buffer);
+            m_clipChunk.buffer.clear();
+            // 反序列化容器，提取纯文本（format 0 / Text）
+            std::string text = unmarshalText(assembled);
+            if (m_clipboardSync.load() && !text.empty()) {
+                ClipboardCallback cb = nullptr;
+                {
+                    std::lock_guard<std::mutex> lock(m_clipboardMutex);
+                    cb = m_clipboardCb;
+                    m_lastClipboardText = text;   // 记录，用于忽略后续本机同源回环
+                }
+                if (cb) {
+                    cb(text);
+                }
+                DF_LOGI("DCLP: assembled %{public}zu bytes, text %{public}zu -> JS", assembled.size(), text.size());
+            } else {
+                DF_LOGD("DCLP: assembled %{public}zu bytes, text %{public}zu, ignored (sync=%{public}d)",
+                    assembled.size(), text.size(), m_clipboardSync.load() ? 1 : 0);
+            }
+            return true;
+        }
+        DF_LOGD("DCLP: unknown mark %{public}u", mark);
         return true;
     }
     if (key == "DFTR") {
