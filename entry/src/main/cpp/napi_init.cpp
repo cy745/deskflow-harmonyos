@@ -113,6 +113,15 @@ static napi_value ConnectDeskflow(napi_env env, napi_callback_info info)
     }
     DF_LOGI("connectDeskflow: old running=%{public}d, target %{public}s:%{public}d screen %{public}dx%{public}d",
         g_deskflowClient.isRunning() ? 1 : 0, hostBuf, port, screenW, screenH);
+    if (g_deskflowClient.isRunning()) {
+        // 旧 worker 1.5s 仍未能退出（例如卡在 connect 超时）。不硬启新线程，
+        // 明确提示用户稍后重试，避免静默覆盖/误导。
+        std::string msg = "previous client is still stopping, please retry in a moment";
+        DF_LOGE("%{public}s", msg.c_str());
+        napi_value result;
+        napi_create_string_utf8(env, msg.c_str(), msg.size(), &result);
+        return result;
+    }
     g_deskflowClient.setStatusCallback(DeskflowStatusCb);
     g_deskflowClient.setScreenSize(screenW, screenH);
     g_deskflowClient.setAutoReconnect(true, 3000);  // 心跳/运行时断开自动重连（3s 间隔）
