@@ -132,6 +132,11 @@ end
 - [踩坑记录与解决方案](docs/TROUBLESHOOTING.md)
 - [签名配置说明](signingConfigs/README.md)
 
+## 参与贡献
+
+欢迎报告 Issue、提交 PR 或改进文档。请先阅读[参与贡献指南](CONTRIBUTING.md)
+（含本项目特别注意事项：协议层 GPL 头、readf 返回值、actionTime=-1、坐标 vp 等约定）。
+
 ## 已知限制
 
 - **剪贴板同步（DCLP/CCLP）未实现**，且服务端需关闭 clipboardSharing 以避免其崩溃 bug。
