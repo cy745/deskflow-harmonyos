@@ -205,11 +205,22 @@ struct Index {
       const sys = pasteboard.getSystemPasteboard();
       const data = sys.getDataSync();
       const text = data.getPrimaryText ? data.getPrimaryText() : '';
+      if (!text) {
+        // 可能：内容非纯文本（getPrimaryText 仅返回 MIMETYPE_TEXT_PLAIN）、空，或未经
+        // READ_PASTEBOARD 授权时读取受限。hasData 无需权限即可判断是否有数据。
+        hilog.info(DOMAIN, 'DeskflowClip', 'readSys empty (has=%{public}d)',
+          sys.hasDataSync() ? 1 : 0);
+      }
       return text ? text : '';
     } catch (e) {
       const err = e as BusinessError;
-      hilog.warn(DOMAIN, 'DeskflowClip', 'read clipboard fail code=%{public}d msg=%{public}s',
-        err.code, err.message);
+      // 201 = 缺少 READ_PASTEBOARD 权限；非 201 为其它异常
+      if (err.code === 201) {
+        hilog.warn(DOMAIN, 'DeskflowClip', 'read clipboard denied: need READ_PASTEBOARD (code 201)');
+      } else {
+        hilog.warn(DOMAIN, 'DeskflowClip', 'read clipboard fail code=%{public}d msg=%{public}s',
+          err.code, err.message);
+      }
     }
     return '';
   }
