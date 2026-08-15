@@ -1,0 +1,37 @@
+# ===== 依赖与构建产物 =====
+/node_modules
+/oh_modules
+/local.properties
+/.idea
+**/build
+/.hvigor
+.cxx
+/.clangd
+/.clang-format
+/.clang-tidy
+**/.test
+/.appanalyzer
+
+# ===== 签名与密钥：严禁上传 =====
+# DevEco 自动生成的签名材料（证书/profile/密钥库）存于用户主目录 ~/.ohos/config，
+# 但为双保险，这里显式忽略项目内可能出现的任何签名/密钥文件，以及记录密码的配置。
+# 说明文档（signingConfigs/README.md）通过 ! 例外保留可跟踪。
+*.p12
+*.p7b
+*.p7c
+*.cer
+*.crt
+*.jks
+*.keystore
+*.key
+*.pem
+*.sign.json
+*_release.json5
+signingConfigs/*
+!signingConfigs/README.md
+!**/signingConfigs/README.md
+
+# 本地 DevEco 项目配置（含机器相关绝对路径，不共享）
+.idea/
+*.iml
+local.properties
