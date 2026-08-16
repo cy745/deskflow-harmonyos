@@ -613,6 +613,7 @@ bool DeskflowClient::handleMessage(const std::string& key)
         if (!ProtoUtil::readf(m_stream, "%1i", &button)) {
             return false;
         }
+        DF_LOGI("DMDN button=%{public}u at (%{public}d,%{public}d)", button, m_pointerX.load(), m_pointerY.load());
         injectMouseButton(button, true);
         return true;
     }
@@ -621,6 +622,7 @@ bool DeskflowClient::handleMessage(const std::string& key)
         if (!ProtoUtil::readf(m_stream, "%1i", &button)) {
             return false;
         }
+        DF_LOGI("DMUP button=%{public}u at (%{public}d,%{public}d)", button, m_pointerX.load(), m_pointerY.load());
         injectMouseButton(button, false);
         return true;
     }
@@ -895,6 +897,12 @@ void DeskflowClient::syncModifiers(uint32_t mask)
 
 bool DeskflowClient::injectMouseMove(int32_t x, int32_t y)
 {
+    // OH_Input_InjectMouseEventGlobal 把坐标 0（边沿）视为无效：x=0 或 y=0 时返回 401，
+    // 导致拖到屏幕边缘（顶部 y=0 / 左缘 x=0）时 MOVE/BUTTON_UP 注入失败、窗口拖不/释放不掉。
+    // 钳到 [1, W-1]/[1, H-1] 避开 0，仍在屏幕内，不影响边缘吸附/最大化语义。
+    if (x < 1) x = 1; else if (x > m_screenW - 1) x = m_screenW - 1;
+    if (y < 1) y = 1; else if (y > m_screenH - 1) y = m_screenH - 1;
+
     struct Input_MouseEvent* ev = OH_Input_CreateMouseEvent();
     if (ev == nullptr) {
         return false;
@@ -939,6 +947,10 @@ bool DeskflowClient::injectMouseButton(int32_t buttonId, bool down)
     m_mouseButtonsDown[buttonId] = down;
     int32_t x = m_pointerX.load();
     int32_t y = m_pointerY.load();
+    // 同 injectMouseMove：edge 坐标为 0 时 OH_Input_InjectMouseEventGlobal 返回 401，
+    // 拖到顶部(y=0)松不开正是此因。钳到 [1, W-1]/[1, H-1] 保证 BUTTON_UP 能注入成功。
+    if (x < 1) x = 1; else if (x > m_screenW - 1) x = m_screenW - 1;
+    if (y < 1) y = 1; else if (y > m_screenH - 1) y = m_screenH - 1;
     struct Input_MouseEvent* ev = OH_Input_CreateMouseEvent();
     if (ev == nullptr) {
         return false;
@@ -954,7 +966,8 @@ bool DeskflowClient::injectMouseButton(int32_t buttonId, bool down)
     int32_t ret = OH_Input_InjectMouseEventGlobal(ev);
     OH_Input_DestroyMouseEvent(&ev);
     if (ret != INPUT_SUCCESS) {
-        DF_LOGE("injectMouseButton(%{public}d,%{public}d) failed ret=%{public}d", buttonId, down ? 1 : 0, ret);
+        DF_LOGE("injectMouseButton(%{public}d,%{public}d) at (%{public}d,%{public}d) failed ret=%{public}d",
+            buttonId, down ? 1 : 0, x, y, ret);
     }
     return ret == INPUT_SUCCESS;
 }
