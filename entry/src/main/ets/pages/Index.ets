@@ -23,7 +23,7 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import deskflow from 'libentry.so';
 import { ConnState, StatusBarManager } from '../statusbar/StatusBarManager';
 import { desktopManager } from '../statusbar/DeskflowStatusStore';
-import { BGEVT_STATUS, BGEVT_CLIP, BGEVT_STOP } from '../background/BackGroundAbility';
+import { BGEVT_STATUS, BGEVT_CLIP, BGEVT_STOP, BGEVT_CLIP_PUSH } from '../background/BackGroundAbility';
 
 const DOMAIN = 0x0000;
 const READ_PASTEBOARD_PERM: Permissions = 'ohos.permission.READ_PASTEBOARD';
@@ -64,8 +64,11 @@ struct Index {
   @State invertScroll: boolean = false;
   @State autoReconnect: boolean = true; // 默认开启自动重连/启动自动连接
   @State clipboardSync: boolean = true; // 默认开启剪贴板同步
+  @State clipLast: string = ''; // 最近一次读取的本机剪贴板内容（按钮读取结果提示）
   // 剪贴板桥接：避免把刚写入的本机内容又当成本机新复制推回去（回环）
   private lastRemoteClipboard: string = '';
+  // 后台承载 Ability 事件订阅器；必须持有引用，否则可能被 GC 回收导致收不到 commonEvent
+  private bgSub: commonEventManager.CommonEventSubscriber | null = null;
 
   // 根据服务端状态字符串推断连接状态
   private mapStatus(s: string): number {
@@ -119,9 +122,14 @@ struct Index {
   /** 订阅后台承载 Ability 广播的连接状态 / 远程剪贴板 */
   private subscribeBgEvents(): void {
     try {
+      if (this.bgSub) {
+        return; // 已订阅
+      }
       const info: commonEventManager.CommonEventSubscribeInfo =
         { events: [BGEVT_STATUS, BGEVT_CLIP] };
       const sub = commonEventManager.createSubscriberSync(info);
+      this.bgSub = sub; // 持有引用，防止 GC 回收导致订阅失效
+      hilog.info(DOMAIN, 'DeskflowBg', 'subscribeBgEvents: created subscriber %{public}s', info.events.join(','));
       commonEventManager.subscribe(sub, (err, data) => {
         if (err) {
           hilog.warn(DOMAIN, 'DeskflowBg', 'subscribe fail: %{public}s', JSON.stringify(err));
@@ -226,12 +234,6 @@ struct Index {
       const sys = pasteboard.getSystemPasteboard();
       const data = sys.getDataSync();
       const text = data.getPrimaryText ? data.getPrimaryText() : '';
-      if (!text) {
-        // 可能：内容非纯文本（getPrimaryText 仅返回 MIMETYPE_TEXT_PLAIN）、空，或未经
-        // READ_PASTEBOARD 授权时读取受限。hasData 无需权限即可判断是否有数据。
-        hilog.info(DOMAIN, 'DeskflowClip', 'readSys empty (has=%{public}d)',
-          sys.hasDataSync() ? 1 : 0);
-      }
       return text ? text : '';
     } catch (e) {
       const err = e as BusinessError;
@@ -244,6 +246,47 @@ struct Index {
       }
     }
     return '';
+  }
+
+  /** PasteButton 点击回调：用户主动点击后获得剪贴板临时授权，读取并推给服务端（鸿蒙→Windows） */
+  private onPasteButtonClick(result: PasteButtonOnClickResult, err?: BusinessError<void>): void {
+    if (result !== PasteButtonOnClickResult.SUCCESS) {
+      const code = err?.code !== undefined ? err.code : '?';
+      this.statusText = `此按钮需用户亲自点击才能读取剪贴板（授权失败 ${code}），请重试`;
+      hilog.warn(DOMAIN, 'DeskflowClip', 'PasteButton auth fail code=%{public}s msg=%{public}s',
+        `${code}`, err?.message ?? '');
+      return;
+    }
+    try {
+      // 用户主动点击 Button 授权后，当前可在临时授权窗口内读取系统剪贴板明文（免 READ_PASTEBOARD）
+      const text = this.readSystemClipboard();
+      this.clipLast = text;
+      if (text.length === 0) {
+        this.statusText = '剪贴板为空或非纯文本，未同步';
+        return;
+      }
+      if (text === this.lastRemoteClipboard) {
+        this.statusText = `剪贴板内容已是最新（${text.length} 字符），无需重复同步`;
+        return;
+      }
+      // 确保同步开启（用户点击即代表期望同步），再把文本推给服务端
+      if (!this.clipboardSync) {
+        this.clipboardSync = true;
+        try {
+          deskflow.setClipboardSync(true);
+        } catch (e) {
+        }
+        this.savePrefs();
+      }
+      this.pushLocalClipboard(text);
+      this.statusText = `已读取本机剪贴板并同步（${text.length} 字符）`;
+      hilog.info(DOMAIN, 'DeskflowClip', 'PasteButton success, read %{public}d chars', text.length);
+    } catch (e) {
+      const err2 = e as BusinessError;
+      hilog.warn(DOMAIN, 'DeskflowClip', 'PasteButton read fail code=%{public}d msg=%{public}s',
+        err2.code, err2.message);
+      this.statusText = `剪贴板读取失败(${err2.code})，请重试`;
+    }
   }
 
   /** 写入系统剪贴板（远程剪贴板文本到达时调用） */
@@ -259,27 +302,27 @@ struct Index {
     }
   }
 
-  /** 本机剪贴板变化（或离开屏幕）时：把本机剪贴板推给服务端。
-   *  注：鸿蒙 6.1 读取系统剪贴板需要 READ_PASTEBOARD（声明会导致安装失败 9568289），
-   *  故 readSystemClipboard 可能拿不到明文，此推送在那种情况下静默跳过。 */
-  private pushLocalClipboard(): void {
+  /** 本机剪贴板变化（或离开屏幕 / PasteButton 点击）时：把本机剪贴板推给服务端。
+   *  @param givenText 可选，外部已读到的文本（如 PasteButton 临时授权内读到），避免二次读取。
+   *  注：通过 commonEvent 把文本交给「已在运行的连接承载进程」去推送，而不是新建实例——
+   *  因为连接 native 环境在 BackGroundAbility 常驻进程里，新建实例没有已建立的连接。
+   *  鸿蒙 6.1 读取系统剪贴板需 READ_PASTEBOARD（声明会导致安装失败 9568289），
+   *  普通 getDataSync 拿不到明文，需由 PasteButton 用户点击授权后才有明文。 */
+  private pushLocalClipboard(givenText?: string): void {
     if (!this.clipboardSync) {
       return;
     }
-    const text = this.readSystemClipboard();
+    const text = givenText !== undefined ? givenText : this.readSystemClipboard();
     if (text && text.length > 0 && text !== this.lastRemoteClipboard) {
       try {
-        // 上传方向把文本交给后台承载 Ability 推送（连接在它进程里）
-        const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
-        const want: Want = {
-          bundleName: 'com.deskflow.ohospoc',
-          abilityName: 'BackGroundAbility',
-          parameters: { 'clipPush': text }
-        };
-        context.startAbility(want).catch((e: BusinessError) => {
-          hilog.warn(DOMAIN, 'DeskflowClip', 'push via BG fail: %{public}s', JSON.stringify(e));
+        // 把文本交给后台承载能力（持有连接）推给服务端
+        const opts: commonEventManager.CommonEventPublishData = { data: text };
+        commonEventManager.publish(BGEVT_CLIP_PUSH, opts, (err) => {
+          if (err) {
+            hilog.warn(DOMAIN, 'DeskflowClip', 'clip push publish fail: %{public}s', JSON.stringify(err));
+          }
         });
-        hilog.info(DOMAIN, 'DeskflowClip', 'push local clipboard len=%{public}d (via BG)', text.length);
+        hilog.info(DOMAIN, 'DeskflowClip', 'push local clipboard len=%{public}d (via BG event)', text.length);
       } catch (e) {
         hilog.warn(DOMAIN, 'DeskflowClip', 'push clipboard fail: %{public}s', JSON.stringify(e));
       }
@@ -437,6 +480,33 @@ struct Index {
         .fontColor('#999999')
         .width('100%')
         .margin({ top: 4 })
+
+      // 安全组件 PasteButton：用户亲自点击后系统才授予一次剪贴板读取临时授权，
+      // 用于"鸿蒙→Windows"方向主动同步（无需申请 READ_PASTEBOARD，普通应用也无法申请）。
+      // 注意：安全组件文字为系统固定文案"粘贴"，故下方用说明文字示意其用途。
+      Row() {
+        PasteButton({ icon: PasteIconStyle.LINES, text: PasteDescription.PASTE })
+          .fontSize(14)
+          .onClick((_event: ClickEvent, result: PasteButtonOnClickResult, err?: BusinessError<void>) => {
+            this.onPasteButtonClick(result, err);
+          })
+        Text('点击读取本机剪贴板并同步到服务端')
+          .fontSize(13)
+          .fontColor('#333333')
+          .margin({ left: 12 })
+      }
+      .width('100%')
+      .margin({ top: 12 })
+
+      if (this.clipLast.length > 0) {
+        Text(`最近读取：${this.clipLast.length > 40 ? this.clipLast.substring(0, 40) + '…' : this.clipLast}`)
+          .fontSize(12)
+          .fontColor('#666666')
+          .width('100%')
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .margin({ top: 4 })
+      }
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)

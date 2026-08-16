@@ -20,6 +20,7 @@ const TAG = 'DeskflowBG';
 export const BGEVT_STATUS = 'deskflow.bg.status';
 export const BGEVT_CLIP = 'deskflow.bg.clip';
 export const BGEVT_STOP = 'deskflow.bg.stop';
+export const BGEVT_CLIP_PUSH = 'deskflow.bg.clip.push';
 
 export default class BackGroundAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
@@ -36,7 +37,6 @@ export default class BackGroundAbility extends UIAbility {
     const invert = want.parameters?.['invert'] === true;
     const autoReconnect = want.parameters?.['autoreconnect'] !== false;
     const clipboard = want.parameters?.['clipboard'] === true;
-    const clipPush = want.parameters?.['clipPush'] as string;
 
     try {
       const d = display.getDefaultDisplaySync();
@@ -45,13 +45,8 @@ export default class BackGroundAbility extends UIAbility {
       deskflow.setInvertScroll(invert);
       deskflow.setAutoReconnect(autoReconnect);
       deskflow.setClipboardSync(clipboard);
-      if (clipPush) {
-        deskflow.pushClipboard(clipPush);
-        hilog.info(DOMAIN, TAG, 'push clipboard len=%{public}d', clipPush.length);
-      } else {
-        deskflow.connectDeskflow(host, port, screen, w, h);
-        hilog.info(DOMAIN, TAG, 'connect %{public}s:%{public}d', host, port);
-      }
+      deskflow.connectDeskflow(host, port, screen, w, h);
+      hilog.info(DOMAIN, TAG, 'connect %{public}s:%{public}d', host, port);
     } catch (e) {
       hilog.error(DOMAIN, TAG, 'connect/push failed: %{public}s', JSON.stringify(e));
     }
@@ -70,6 +65,7 @@ export default class BackGroundAbility extends UIAbility {
     }
     try {
       deskflow.onClipboardData((event: deskflow.ValueChangeEvent) => {
+        hilog.info(DOMAIN, TAG, 'onClipboardData recv len=%{public}d, publish BGEVT_CLIP', (event.value ?? '').length);
         const msg: commonEventManager.CommonEventData = { event: BGEVT_CLIP, data: event.value };
         this.publish(msg);
       });
@@ -90,6 +86,27 @@ export default class BackGroundAbility extends UIAbility {
       });
     } catch (e) {
       hilog.error(DOMAIN, TAG, 'stop sub fail: %{public}s', JSON.stringify(e));
+    }
+    // 订阅「推送本机剪贴板」：主窗口把本机剪贴板文本发来，由本进程（持有连接）推给服务端（鸿蒙→Windows）
+    try {
+      const pushInfo: commonEventManager.CommonEventSubscribeInfo = { events: [BGEVT_CLIP_PUSH] };
+      const pushSub = commonEventManager.createSubscriberSync(pushInfo);
+      commonEventManager.subscribe(pushSub, (err, data) => {
+        if (!err && data?.data) {
+          const text = `${data.data}`;
+          hilog.info(DOMAIN, TAG, 'clip push request len=%{public}d', text.length);
+          try {
+            // 用户点击 PasteButton 即代表期望同步，确保本进程同步开关打开再推
+            deskflow.setClipboardSync(true);
+            deskflow.pushClipboard(text);
+            hilog.info(DOMAIN, TAG, 'clip pushed to server ok');
+          } catch (e) {
+            hilog.error(DOMAIN, TAG, 'pushClipboard fail: %{public}s', JSON.stringify(e));
+          }
+        }
+      });
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'clip push sub fail: %{public}s', JSON.stringify(e));
     }
   }
 
